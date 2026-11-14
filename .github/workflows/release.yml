@@ -21,7 +21,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # The static build runs in the Alpine image with `docker run`, not as a job container,
       # because GitHub's JavaScript actions cannot run in Alpine containers on ARM64 runners.
       - name: Build static binary
@@ -45,7 +45,7 @@ jobs:
     needs: binary
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           path: dist
