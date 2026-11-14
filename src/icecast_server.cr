@@ -61,6 +61,7 @@ class IcecastServer
 
   def initialize(@config : Config)
     setup_features
+    Lurcast::Plugins.build(@config).each { |plugin| add_extension(plugin) }
   end
 
   def start
@@ -164,11 +165,11 @@ class IcecastServer
     method = request.method
     headers = request.headers
     begin_access(client)
-    return if @extensions.any?(&.handle_request(self, client, request, address))
     if mutating_request?(method, request.path) && cross_site_form?(headers, request.query_params)
       send_response(client, 403, "Cross-site admin requests are not allowed")
       return
     end
+    return if @extensions.any?(&.handle_request(self, client, request, address))
 
     case method
     when "PUT", "SOURCE"
@@ -231,7 +232,7 @@ class IcecastServer
     when "/status-json.xsl", "/status.json"
       send_json(client, status_json(public_streams), headers, head: head)
     when "/api/v1/stations"
-      body = RadioAPI.render(SERVER_ID, @config.public_url, @start_time, public_streams)
+      body = RadioAPI.render(SERVER_ID, @config.public_url, @start_time, public_streams, artwork_urls)
       send_json(client, body, headers, head: head)
     when "/admin"
       if headers["Accept"]?.try(&.includes?("text/html"))
@@ -356,7 +357,7 @@ class IcecastServer
     if !was_listed && mountpoint.listed
       @config.yp_urls.each { |url| start_yp_loop(mountpoint, url) }
     end
-    response = RadioAPI.render_station(@config.public_url, mountpoint)
+    response = RadioAPI.render_station(@config.public_url, mountpoint, artwork_url(mount))
     send_json(client, response, headers)
   rescue ex : JSON::ParseException | ArgumentError
     send_api_error(client, 400, "Invalid JSON: #{ex.message}", request.headers)
@@ -416,6 +417,10 @@ class IcecastServer
     client_ip = client_address(headers, address)
     if @bans.match(client_ip, user_agent, mount)
       send_banned(client, head)
+      return
+    end
+    if realm = listener_challenge(mount, headers, client_ip)
+      request_authentication(client, realm)
       return
     end
     mountpoint = resolve_mount(mount)
@@ -649,7 +654,7 @@ class IcecastServer
       existing = @streams[mount]?
       if existing.try(&.has_source?)
         nil
-      elsif existing.nil? && @streams.count { |_name, point| !point.source_protocol.file? } >= @config.max_sources
+      elsif existing.nil? && @streams.count { |_name, point| !point.source_protocol.in?(SourceProtocol::File, SourceProtocol::Internal) } >= @config.max_sources
         nil
       else
         point = existing || build_mount(mount, headers, protocol)
@@ -829,7 +834,14 @@ class IcecastServer
   end
 
   private def status_json(listed : Array(MountPoint)) : String
-    IcecastAPI.render(SERVER_ID, @start_time, listed)
+    IcecastAPI.render(SERVER_ID, @start_time, listed, artwork_urls)
+  end
+
+  private def artwork_urls : Hash(String, String)
+    return {} of String => String if @extensions.empty?
+    streams.each_with_object({} of String => String) do |stream, urls|
+      artwork_url(stream.mount).try { |url| urls[stream.mount] = url }
+    end
   end
 
   # Streams shown on unauthenticated status pages; `hidden` mounts stay visible to admins.
@@ -1279,6 +1291,71 @@ class IcecastServer
       end
     end
     nil
+  end
+
+  # The realm to ask a listener of *mount* to sign in to, when an extension protects the mount and the
+  # request has no valid login.
+  def listener_challenge(mount : String, headers : HTTP::Headers, address : String) : String?
+    @extensions.each do |extension|
+      if realm = extension.listener_challenge(mount, headers, address)
+        return realm
+      end
+    end
+    nil
+  end
+
+  def artwork_url(mount : String) : String?
+    @extensions.each do |extension|
+      if url = extension.artwork_url(mount)
+        return url
+      end
+    end
+    nil
+  end
+
+  # Sends a binary body, such as an image.
+  def respond_bytes(client : IO, status : Int32, body : Bytes, content_type : String, headers : HTTP::Headers? = nil, *, head = false) : Nil
+    write_response(client, status, body, content_type, headers, head)
+  end
+
+  # Answers 401, asking for a login to *realm*.
+  def challenge(client : IO, realm : String) : Nil
+    request_authentication(client, realm)
+  end
+
+  # The login in *headers*: the server admin or a login an extension grants; nil when missing or wrong.
+  def admin_login(headers : HTTP::Headers) : AdminAccess?
+    admin_access(headers)
+  end
+
+  # The address of the client: the socket *address*, or the forwarded one behind a trusted proxy.
+  def client_ip(headers : HTTP::Headers, address : String) : String
+    client_address(headers, address)
+  end
+
+  # The mount named by *path* (`/live`, `live`, a SHOUTcast stream number alias), or nil if invalid.
+  def mount_name(path : String) : String?
+    canonical_mount(path)
+  end
+
+  # Publishes what *source* produces on *mount*, like a source client connected to the server, until
+  # *source* ends or is closed. Returns false at once when the mount already has a source.
+  def serve_source(mount : String, source : IO, headers : HTTP::Headers) : Bool
+    mountpoint = attach_source(mount, source, headers, SourceProtocol::Internal)
+    return false unless mountpoint
+    begin
+      read_source(source, mountpoint)
+    rescue ex : IO::Error
+      Log.debug { "Internal source for #{mount} stopped: #{ex.message}" }
+    ensure
+      release_source(mount, mountpoint, source)
+    end
+    true
+  end
+
+  # Sets the certificate for TLS connections, for example after renewing it.
+  def tls_context=(context : OpenSSL::SSL::Context::Server) : Nil
+    @tls_context = context
   end
 
   private def running? : Bool

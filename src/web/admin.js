@@ -62,6 +62,7 @@
     play: "M8 5v14l11-7z",
     reload: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
     download: "M12 4v11m0 0-4-4m4 4 4-4M5 20h14",
+    upload: "M12 16V5m0 0-4 4m4-4 4 4M5 20h14",
   };
 
   const icon = (name) => {
@@ -156,7 +157,7 @@
     return agent.split(/[\s/(]/)[0] || agent;
   };
 
-  const PROTOCOLS = { icecast: "Icecast source", shoutcast_v1: "SHOUTcast v1", shoutcast_v2: "SHOUTcast v2", relay: "Relay", file: "Fallback file", unknown: "Source" };
+  const PROTOCOLS = { icecast: "Icecast source", shoutcast_v1: "SHOUTcast v1", shoutcast_v2: "SHOUTcast v2", relay: "Relay", file: "Fallback file", internal: "Transcoded", unknown: "Source" };
 
   const regionNames = (() => {
     try { return new Intl.DisplayNames([navigator.language || "en"], { type: "region" }); } catch (_) { return null; }
@@ -548,7 +549,7 @@
       case "listeners": return [listenersToolbar(m), listenersTable(m)];
       case "history": return [historySection(m)];
       case "bans": return [bansList(m), banForm(m)];
-      case "settings": return [recordingSection(m), stationForm(m), fallbackForm(m), dangerZone(m)];
+      case "settings": return [recordingSection(m), stationForm(m), artworkSection(m), listenerLoginsSection(m), fallbackForm(m), dangerZone(m)];
       default: return [nowPlaying(m), statsSection(m), historyPanel(m.mount), mountLocations(m), connectSection(m)];
     }
   };
@@ -577,7 +578,8 @@
         });
       },
     }, input, h("button", { class: "btn", type: "submit" }, "Update title"));
-    const wrapper = section("now", h("div", { class: "nowplaying" },
+    const wrapper = section("now", h("div", { class: m.artwork ? "nowplaying nowplaying--art" : "nowplaying" },
+      m.artwork ? h("img", { class: "nowplaying__art", src: m.artwork, alt: "", width: "96", height: "96" }) : null,
       h("span", { class: "now__label" }, "Now playing"),
       h("p", { class: m.song ? "nowplaying__song" : "nowplaying__song is-empty" }, m.song || "The source has not sent a song title"),
       m.song_updated_at ? h("p", { class: "nowplaying__since" }, `Changed ${ago(m.song_updated_at)}`) : null,
@@ -837,6 +839,118 @@
         }
       },
     }, "Disconnect source")));
+
+// ---------- Plugins: cover art and listener logins ----------
+
+const plugin = (name) => (state.data.server.features.plugins || []).includes(name);
+
+const uploadArtwork = async (m, type, file) => {
+  try {
+    const response = await fetch(`/admin/artwork?${new URLSearchParams({ mount: m.mount, type })}`, {
+      method: "POST", body: file, cache: "no-store", credentials: "omit",
+      headers: { Authorization: state.auth, "X-Lurcast-Admin": "1", "Content-Type": file.type || "application/octet-stream" },
+    });
+    if (response.status === 401) throw new AuthError("Sign in again");
+    if (!response.ok) {
+      const text = await response.text();
+      let message = text;
+      try { message = JSON.parse(text).error || text; } catch (_) { /* keep text */ }
+      throw new Error(message || `Upload failed (${response.status})`);
+    }
+    toast(type === "station" ? "Station logo saved" : "Cover saved");
+    await refresh();
+  } catch (error) {
+    if (error instanceof AuthError) return signOut("Your session ended. Sign in again.");
+    toast(error.message, true);
+  }
+};
+
+const artworkSection = (m) => {
+  if (!plugin("cover_art")) return section("artwork");
+  const picker = (type, text) => {
+    const input = h("input", { type: "file", accept: "image/jpeg,image/png,image/gif,image/webp", class: "sr-only" });
+    input.addEventListener("change", () => { if (input.files[0]) uploadArtwork(m, type, input.files[0]); input.value = ""; });
+    return h("label", { class: "btn btn--sm" }, input, icon("upload"), text);
+  };
+  const remove = (type, text) => h("button", {
+    class: "btn btn--sm", type: "button",
+    onclick: () => action(() => request("POST", "/admin/artwork/remove", { mount: m.mount, type }), `${text} removed`),
+  }, `Remove ${text.toLowerCase()}`);
+  return section("artwork", h("div", { class: "panel panel--flat" },
+    h("div", { class: "panel__head" }, h("h3", { class: "panel__title" }, "Cover art")),
+    h("div", { class: "panel__body stack" },
+      h("div", { class: "toolbar" },
+        m.artwork ? h("img", { class: "artwork-preview", src: m.artwork, alt: "Current cover art", width: "64", height: "64" }) : null,
+        h("p", { class: "muted small" }, m.artwork
+          ? "Players get this image from the status JSON. The song cover is shown when there is one, otherwise the station logo."
+          : "SHOUTcast 2 encoders send cover art with the stream. For other encoders, upload a station logo here, or have your automation upload the cover of each song.")),
+      h("div", { class: "row-actions" },
+        picker("station", "Upload station logo"), m.artwork ? remove("station", "Logo") : null,
+        picker("playing", "Upload song cover"), m.artwork ? remove("playing", "Cover") : null))));
+};
+
+const listenerLogins = new Map();
+const listenerLoginsAt = new Map();
+
+const loadListenerLogins = async (mount) => {
+  try {
+    const { text } = await request("GET", "/admin/api/listener-logins", { mount });
+    listenerLogins.set(mount, JSON.parse(text));
+  } catch (error) {
+    if (error instanceof AuthError) return signOut("Your session ended. Sign in again.");
+    listenerLogins.set(mount, null);
+  }
+  const old = ui.body && ui.body.querySelector('[data-section="listener-logins"]');
+  if (old && !preserved(old) && currentMount() && currentMount().mount === mount) old.replaceWith(listenerLoginsSection(currentMount()));
+};
+
+const listenerLoginsSection = (m) => {
+  if (!plugin("listener_logins")) return section("listener-logins");
+  const now = Date.now();
+  if (now - (listenerLoginsAt.get(m.mount) || 0) > 15000) {
+    listenerLoginsAt.set(m.mount, now);
+    loadListenerLogins(m.mount);
+  }
+  const head = h("div", { class: "panel__head" }, h("h3", { class: "panel__title" }, "Listener logins"));
+  const list = listenerLogins.get(m.mount);
+  if (list === undefined) return section("listener-logins", h("div", { class: "panel panel--flat" }, head, h("div", { class: "panel__body" }, h("p", { class: "muted small" }, "Loading…"))));
+  if (list === null) {
+    return section("listener-logins", h("div", { class: "panel panel--flat" }, head, h("div", { class: "panel__body" },
+      h("p", { class: "muted small" }, "Anyone can listen to this mount. To require a login, list it under plugins.listener_logins.mounts in config.yml."))));
+  }
+  const user = h("input", { class: "input", name: "user", autocomplete: "off", required: "", maxlength: "255" });
+  const password = h("input", { class: "input", name: "password", type: "password", autocomplete: "new-password", required: "", minlength: "4" });
+  const reload = () => { listenerLoginsAt.set(m.mount, 0); loadListenerLogins(m.mount); };
+  const wrapper = section("listener-logins", h("div", { class: "panel panel--flat" }, head,
+    h("div", { class: "panel__body stack" },
+      h("p", { class: "muted small" }, `Listeners sign in with one of these logins, for example with ${m.listen_url.replace("://", "://user:password@")}. They are kept in ${list.file}.`),
+      list.users.length
+        ? h("div", { class: "table-wrap" }, h("table", { class: "table" },
+          h("thead", null, h("tr", null, h("th", null, "User"), h("th", null, h("span", { class: "sr-only" }, "Remove")))),
+          h("tbody", null, list.users.map((name) => h("tr", null,
+            h("td", { class: "mono" }, name),
+            h("td", null, h("div", { class: "row-actions" }, h("button", {
+              class: "btn btn--sm", type: "button",
+              onclick: async () => {
+                if (await confirmAction(`Remove ${name}?`, "They can no longer listen to this mount. Players that are already connected keep playing until they reconnect.", "Remove login")) {
+                  await action(() => request("POST", "/admin/listener-logins/remove", { mount: m.mount, user: name }), "Login removed", reload);
+                }
+              },
+            }, "Remove"))))))))
+        : h("p", { class: "muted small" }, "No logins yet, so nobody can listen."),
+      h("form", {
+        class: "form-grid",
+        onsubmit: async (event) => {
+          event.preventDefault();
+          const ok = await action(() => request("POST", "/admin/listener-logins", { mount: m.mount, user: user.value.trim(), password: password.value }), "Login saved", () => { wrapper.dataset.dirty = ""; document.activeElement.blur(); });
+          if (ok) reload();
+        },
+      },
+      field("User", user), field("Password", password, "Saving an existing user changes their password."),
+      h("div", { class: "form-actions span-2" }, h("button", { class: "btn btn--primary", type: "submit" }, "Save login"))))));
+  markDirty(wrapper);
+  return wrapper;
+};
 
   // ---------- Listener history chart ----------
 

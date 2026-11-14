@@ -16,6 +16,7 @@ class IcecastServer
     cipher_requested = false
     headers = HTTP::Headers.new
     metadata_fragments = {} of UInt16 => Array(Bytes?)
+    artwork_fragments = {} of UInt16 => Array(Bytes?)
     mount = nil.as(String?)
     mountpoint = nil.as(MountPoint?)
     sync_read = true
@@ -105,8 +106,8 @@ class IcecastServer
         Ultravox.write(client, message.type, "ACK\0")
       when 0x1005
         break
-      when 0x3902
-        handle_uvox_metadata(mountpoint, message.payload, metadata_fragments) if mountpoint
+      when 0x3902, 0x4000..0x41ff
+        handle_uvox_cacheable(mountpoint, message, metadata_fragments, artwork_fragments)
       else
         unless Ultravox.data_type?(message.type)
           Log.debug { "Ignoring Ultravox message 0x#{message.type.to_s(16)}" }
@@ -133,7 +134,19 @@ class IcecastServer
     Ultravox.write(client, type, "NAK:#{reason}\0")
   end
 
-  private def handle_uvox_metadata(mountpoint : MountPoint, payload : Bytes, fragments : Hash(UInt16, Array(Bytes?)))
+  # Song titles (XML, 0x3902) and artwork (0x40xx and 0x41xx); ignored before the source goes live.
+  private def handle_uvox_cacheable(mountpoint : MountPoint?, message : Ultravox::Message, metadata : Hash(UInt16, Array(Bytes?)), artwork : Hash(UInt16, Array(Bytes?)))
+    return unless mountpoint
+    if message.type == 0x3902
+      handle_uvox_metadata(mountpoint, message.payload, metadata)
+    else
+      handle_uvox_artwork(mountpoint, message.type, message.payload, artwork)
+    end
+  end
+
+  # Collects one fragment of a metadata message that spans several Ultravox messages. Returns the
+  # whole message once every fragment has arrived.
+  private def uvox_fragment(payload : Bytes, fragments : Hash(UInt16, Array(Bytes?))) : Bytes?
     raise ArgumentError.new("invalid Ultravox metadata") if payload.size < 6
     id = IO::ByteFormat::BigEndian.decode(UInt16, payload[0, 2])
     span = IO::ByteFormat::BigEndian.decode(UInt16, payload[2, 2]).to_i
@@ -144,13 +157,33 @@ class IcecastServer
     raise ArgumentError.new("inconsistent Ultravox metadata span") unless parts.size == span
     parts[index - 1] = payload[6..].dup
     return unless parts.all?(&.nil?.!)
+    fragments.delete(id)
+    whole = IO::Memory.new
+    parts.each { |part| part.try { |value| whole.write(value) } }
+    whole.to_slice
+  end
 
-    xml = String.build { |io| parts.each { |part| part.try { |value| io.write(value) } } }
+  ARTWORK_TYPES = {"image/jpeg", "image/png", "image/bmp", "image/gif"}
+
+  # Station logos are types 0x40xx and the playing song's cover 0x41xx; the low byte is the format.
+  private def handle_uvox_artwork(mountpoint : MountPoint, type : UInt16, payload : Bytes, fragments : Hash(UInt16, Array(Bytes?)))
+    content_type = ARTWORK_TYPES[(type & 0xff).to_i]? || return
+    playing = type & 0x0100 != 0
+    data = uvox_fragment(payload, fragments) || return
+    @extensions.each do |extension|
+      extension.artwork_received(mountpoint.mount, playing, content_type, data)
+    rescue ex
+      Log.error(exception: ex) { "Extension failed to store artwork for #{mountpoint.mount}" }
+    end
+  end
+
+  private def handle_uvox_metadata(mountpoint : MountPoint, payload : Bytes, fragments : Hash(UInt16, Array(Bytes?)))
+    whole = uvox_fragment(payload, fragments) || return
+    xml = String.new(whole)
     document = XML.parse(xml)
     title = document.xpath_string("string(//TIT2)")
     title = document.xpath_string("string(//SONGTITLE)") if title.empty?
     mountpoint.update_metadata(title) unless title.empty?
-    fragments.delete(id)
   rescue ex : XML::Error
     Log.debug { "Invalid SHOUTcast XML metadata: #{ex.message}" }
   end

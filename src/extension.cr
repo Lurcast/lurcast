@@ -61,5 +61,19 @@ module Lurcast
     # Called when the song on *mount* changes, with the listener count at that moment.
     def song_changed(mount : String, song : String, listeners : Int32, at : Time) : Nil
     end
+
+    # Protects *mount* with a listener login: returns the realm to ask for credentials with (a 401
+    # response), or nil when this extension does not protect the mount or the credentials are right.
+    def listener_challenge(mount : String, headers : HTTP::Headers, address : String) : String?
+    end
+
+    # Called when a SHOUTcast 2 source sends artwork for *mount*: the station logo, or the cover of
+    # the song playing when *playing* is true. An empty *data* removes it.
+    def artwork_received(mount : String, playing : Bool, content_type : String, data : Bytes) : Nil
+    end
+
+    # The path of the cover art for *mount*, listed in status output; nil when there is none.
+    def artwork_url(mount : String) : String?
+    end
   end
 end

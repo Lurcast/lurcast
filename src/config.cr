@@ -2,6 +2,7 @@ require "log"
 require "yaml"
 require "./trusted_proxies"
 require "uri"
+require "./plugin"
 
 class RelayConfig
   include YAML::Serializable
@@ -164,6 +165,8 @@ class Config
   property trusted_proxies : Array(String) = [] of String
   # Settings for optional editions (for example `hosting:`); the core server ignores them.
   property hosting : YAML::Any?
+  # Settings for the plugins built into the server (`acme`, `listener_logins`, `transcode`, ...), by name.
+  property plugins : Hash(String, YAML::Any) = {} of String => YAML::Any
 
   def initialize
   end
@@ -235,6 +238,7 @@ class Config
     @mounts.each { |mount, settings| validate_mount_settings!(mount, settings) }
     raise ArgumentError.new("song_history_size must not be negative") if @song_history_size.negative?
     validate_features!
+    Lurcast::Plugins.validate!(self)
     if webroot = @webroot
       raise ArgumentError.new("webroot must be a directory") unless Dir.exists?(webroot)
     end

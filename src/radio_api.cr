@@ -63,7 +63,7 @@ module RadioAPI
     include JSON::Serializable
   end
 
-  record NowPlaying, song : String?, updated_at : Time? do
+  record NowPlaying, song : String?, updated_at : Time?, artwork_url : String? = nil do
     include JSON::Serializable
   end
 
@@ -81,9 +81,10 @@ module RadioAPI
     include JSON::Serializable
   end
 
-  def self.render(server_id : String, public_url : String, started_at : Time, streams : Array(MountPoint)) : String
+  # *artwork* maps mounts to the path of their cover art.
+  def self.render(server_id : String, public_url : String, started_at : Time, streams : Array(MountPoint), artwork = {} of String => String) : String
     base_url = public_url.rstrip('/')
-    stations = streams.map { |stream| station(base_url, stream) }.sort_by!(&.mount)
+    stations = streams.map { |stream| station(base_url, stream, artwork[stream.mount]?) }.sort_by!(&.mount)
     server = ServerInfo.new(
       server_id,
       started_at,
@@ -94,11 +95,11 @@ module RadioAPI
     Response.new("1", server, stations).to_json
   end
 
-  def self.render_station(public_url : String, stream : MountPoint) : String
-    station(public_url.rstrip('/'), stream).to_json
+  def self.render_station(public_url : String, stream : MountPoint, artwork : String? = nil) : String
+    station(public_url.rstrip('/'), stream, artwork).to_json
   end
 
-  private def self.station(base_url : String, stream : MountPoint) : Station
+  private def self.station(base_url : String, stream : MountPoint, artwork : String?) : Station
     details = stream.station_details
     metadata = stream.metadata
     mp3 = stream.mp3_info
@@ -109,7 +110,7 @@ module RadioAPI
       stream.has_source?,
       stream.source_protocol,
       StationInfo.new(details.name, details.description, details.genre, details.url, details.listed),
-      NowPlaying.new(metadata.song.empty? ? nil : metadata.song, metadata.updated_at),
+      NowPlaying.new(metadata.song.empty? ? nil : metadata.song, metadata.updated_at, artwork.try { |path| "#{base_url}#{path}" }),
       StreamInfo.new(
         stream.content_type,
         mp3.try(&.bitrate_kbps) || stream.bitrate,

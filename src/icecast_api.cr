@@ -29,17 +29,19 @@ module IcecastAPI
     title : String,
     stream_start_iso8601 : Time,
     uptime_seconds : Int64,
-    total_bytes_sent : UInt64 do
+    total_bytes_sent : UInt64,
+    artwork : String? = nil do
     include JSON::Serializable
   end
 
-  def self.render(server_id : String, started_at : Time, streams : Array(MountPoint)) : String
-    sources = streams.map { |stream| source(stream) }
+  # *artwork* maps mounts to the path of their cover art, which Lurcast adds as `artwork`.
+  def self.render(server_id : String, started_at : Time, streams : Array(MountPoint), artwork = {} of String => String) : String
+    sources = streams.map { |stream| source(stream, artwork[stream.mount]?) }
     stats = Stats.new(server_id, started_at, sources.sum(&.listeners), sources.size, sources)
     Response.new(stats).to_json
   end
 
-  private def self.source(stream : MountPoint) : Source
+  private def self.source(stream : MountPoint, artwork : String?) : Source
     details = stream.station_details
     listeners, peak, total = stream.listener_stats
     Source.new(
@@ -56,7 +58,8 @@ module IcecastAPI
       stream.current_song,
       stream.start_time,
       stream.uptime_seconds,
-      stream.bytes_sent
+      stream.bytes_sent,
+      artwork
     )
   end
 end

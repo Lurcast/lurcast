@@ -332,7 +332,11 @@ class IcecastServer
   end
 
   private def handle_hls_playlist(client : IO, mount : String, address : String, headers : HTTP::Headers, head : Bool)
-    return send_banned(client, head) if listener_ban(client_address(headers, address), headers, mount)
+    client_ip = client_address(headers, address)
+    return send_banned(client, head) if listener_ban(client_ip, headers, mount)
+    if realm = listener_challenge(mount, headers, client_ip)
+      return request_authentication(client, realm)
+    end
     segmenter = hls_segmenter(mount)
     playlist = segmenter.try(&.playlist("#{WebAssets::PREFIX}/hls#{mount}/"))
     unless playlist
@@ -355,7 +359,11 @@ class IcecastServer
       send_response(client, 404, "Segment not found", head: head)
       return
     end
-    return send_banned(client, head) if listener_ban(client_address(headers, address), headers, mount)
+    client_ip = client_address(headers, address)
+    return send_banned(client, head) if listener_ban(client_ip, headers, mount)
+    if realm = listener_challenge(mount, headers, client_ip)
+      return request_authentication(client, realm)
+    end
     record_hls_client(mount, address)
     response_headers = cors_headers(headers) || HTTP::Headers.new
     response_headers["Cache-Control"] = "public, max-age=#{@config.hls_segment_seconds * @config.hls_window}"

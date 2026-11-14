@@ -38,7 +38,8 @@ module AdminAPI
     hls : Bool,
     locations : String?,
     bans_saved : Bool,
-    history_saved : Bool do
+    history_saved : Bool,
+    plugins : Array(String) do
     include JSON::Serializable
   end
 
@@ -89,7 +90,8 @@ module AdminAPI
     song_updated_at : Time? = nil,
     history : Array(MountPoint::PlayedSong)? = nil,
     countries : Hash(String, Int32)? = nil,
-    clients : Array(MountPoint::ListenerInfo)? = nil do
+    clients : Array(MountPoint::ListenerInfo)? = nil,
+    artwork : String? = nil do
     include JSON::Serializable
 
     # This mount with the live state of *stream* filled in.

@@ -93,6 +93,7 @@ class IcecastServer
           locations: locations_source,
           bans_saved: @bans.persistent?,
           history_saved: !@config.data_dir.nil?,
+          plugins: @extensions.compact_map { |extension| extension.as?(Lurcast::Plugin).try(&.name) },
         ),
       ),
       access: AdminAPI::Access.new(access.user, full),
@@ -119,6 +120,7 @@ class IcecastServer
       recording: recording,
       hls_url: hls ? "#{base_url}#{name}.m3u8" : nil,
       hls_listeners: hls ? hls_listener_count(name) : nil,
+      artwork: artwork_url(name),
     )
     return mount unless stream
     format = Templates.format_label(stream.content_type, stream.mp3_info.try(&.bitrate_kbps) || stream.bitrate)
