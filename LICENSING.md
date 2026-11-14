@@ -38,3 +38,21 @@ info@lurcast.com.
 
 Contributions are accepted under the [contributor agreement](CONTRIBUTING.md), which lets the
 project keep offering both editions.
+
+## Third-party code
+
+The binary includes code from other projects, all under permissive licenses that allow both the
+AGPL and the commercial licenses above:
+
+| Component | Used for | License |
+|---|---|---|
+| [libopus](https://opus-codec.org/) | Opus encoding and decoding (transcode plugin) | BSD 3-clause |
+| [libogg](https://xiph.org/ogg/) | Ogg page parsing | BSD 3-clause |
+| [minimp3](https://github.com/lieff/minimp3) (vendored in `ext/`) | MP3 decoding (transcode plugin) | CC0 1.0 |
+| [stb_vorbis](https://github.com/nothings/stb) (vendored in `ext/`) | Vorbis decoding (transcode plugin) | MIT or public domain |
+| [SpeexDSP resampler](https://github.com/xiph/speexdsp) (vendored in `ext/`) | Resampling to 48 kHz (transcode plugin) | BSD 3-clause |
+
+See [ext/README.md](ext/README.md) for the vendored versions. BSD-licensed components require their
+copyright notices in binary distributions: [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) has the license of
+every part of the static binary (also OpenSSL, musl, the Crystal standard library, and others), and
+ships with each release and in the Docker image at `/usr/share/licenses/lurcast/`.

@@ -6,7 +6,7 @@ RUN apk add --no-cache ca-certificates \
     && addgroup -S lurcast && adduser -S -G lurcast -H lurcast \
     && mkdir -p /etc/lurcast /var/lib/lurcast && chown lurcast:lurcast /var/lib/lurcast
 COPY --chmod=0755 dist/lurcast-linux-${TARGETARCH} /usr/local/bin/lurcast
-COPY LICENSE LICENSING.md /usr/share/licenses/lurcast/
+COPY LICENSE LICENSING.md THIRD_PARTY_NOTICES.txt /usr/share/licenses/lurcast/
 USER lurcast
 EXPOSE 8000
 # Bans and listener history; mount a volume here to keep them.

@@ -42,8 +42,9 @@ See [LICENSING.md](LICENSING.md) for details.
 - An access log in the combined format, and reloading `config.yml` without a restart
 - Listener history charts (24 hours to 12 months) and a ban list for addresses, address ranges, and players
 - HTTP and `ICY 200 OK` listener responses for Icecast/Shoutcast-compatible players
+- Built-in plugins: automatic HTTPS with Let's Encrypt, transcoding to Opus, cover art (including SHOUTcast 2 album art), and listener logins from `htpasswd` files
 
-Lurcast relays encoded audio; it does not transcode streams.
+Lurcast relays encoded audio as the source sends it; the optional transcode plugin can also publish an Opus copy of a mount.
 
 ## Install
 
@@ -65,7 +66,7 @@ docker run -p 8000:8000 -e LURCAST_SOURCE_PASSWORD=... -e LURCAST_ADMIN_PASSWORD
 
 Crystal 1.21.0 or newer is required. The repository's `.tool-versions` selects 1.21.0 for asdf users.
 
-Install libogg with `brew install libogg` on macOS or `sudo apt install libogg-dev` on Debian/Ubuntu.
+Install libogg and libopus with `brew install libogg opus` on macOS or `sudo apt install libogg-dev libopus-dev` on Debian/Ubuntu, plus a C compiler (the bundled decoders in `ext/` are compiled during the build).
 
 ```sh
 shards build --release
@@ -260,6 +261,100 @@ trusted_proxies: [127.0.0.1, "::1", 10.0.0.0/8]
 ```
 
 Connection and rate limits still apply to the address that connects.
+
+## Plugins
+
+Some features are plugins: they are built into the same binary but kept apart from the core server, in `src/plugins/`, and each one is turned on and set up in its own section under `plugins:` in `config.yml`. The dashboard shows the controls of the plugins that are on. Settings for a plugin that doesn't exist are an error, so typos are caught at startup.
+
+### Cover art
+
+On by default. SHOUTcast 2 encoders (Ultravox 2.1) send the station logo and the cover of each song inside the stream; Lurcast keeps them and serves them to players:
+
+- `/_lurcast/art/<mount>`: the song's cover, or the station logo when there is none (`?type=station` or `?type=playing` for one of them). Responses carry an `ETag`, so players can check for a new cover cheaply.
+- `/streamart?sid=1` and `/playingart?sid=1`: the paths the SHOUTcast 2 server uses.
+- The status JSON lists the path as `artwork` for each mount, and `/api/v1/stations` as `now_playing.artwork_url`.
+
+Encoders that can't send artwork (Icecast sources) can have it uploaded from the dashboard's Settings tab, or by automation for every song:
+
+```sh
+curl --user admin:admin123 -H 'Content-Type: image/jpeg' --data-binary @cover.jpg 'http://localhost:8000/admin/artwork?mount=/live&type=playing'
+curl --user admin:admin123 -H 'Content-Type: image/png' --data-binary @logo.png 'http://localhost:8000/admin/artwork?mount=/live&type=station'
+curl --user admin:admin123 -X POST 'http://localhost:8000/admin/artwork/remove?mount=/live&type=playing'
+```
+
+Images are JPEG, PNG, GIF, WebP, or BMP, up to 1 MB. With `data_dir` set, station logos are kept in `artwork/` there and survive restarts; song covers are kept in memory. Turn the plugin off with `plugins: {cover_art: {enabled: false}}`.
+
+### Listener logins
+
+Makes mounts private: listeners need a user name and password from an Apache `htpasswd` file. Players send them with HTTP Basic authentication, usually from a URL like `https://anna:secret@radio.example.com/private`.
+
+```yaml
+plugins:
+  listener_logins:
+    mounts:
+      /private: /etc/lurcast/private.htpasswd
+      "*": /etc/lurcast/listeners.htpasswd   # optional: every other mount
+    realm: My Radio                           # optional: the name players show when they ask
+```
+
+Manage the logins in the dashboard (Settings tab of the mount), with the API, or by editing the file with `htpasswd`; Lurcast reads it again when it changes. Lurcast checks bcrypt, Apache MD5 (`$apr1$`), `{SHA}`, and Icecast's plain MD5 hashes, and saves new passwords with bcrypt.
+
+```sh
+curl --user admin:admin123 'http://localhost:8000/admin/api/listener-logins?mount=/private'
+curl --user admin:admin123 -X POST 'http://localhost:8000/admin/listener-logins?mount=/private&user=anna&password=secret'
+curl --user admin:admin123 -X POST 'http://localhost:8000/admin/listener-logins/remove?mount=/private&user=anna'
+```
+
+Protected mounts answer `401` without a valid login, on streams and HLS alike. Removing a user or changing a password doesn't disconnect players that are already listening.
+
+### Automatic HTTPS
+
+Gets a free certificate from Let's Encrypt for your domains, serves HTTPS with it, and renews it before it expires. No other software is needed. The domains must point at this server, and port 80 must be reachable from the internet so Let's Encrypt can check them.
+
+```yaml
+data_dir: /var/lib/lurcast          # required: the account key and certificate are kept in acme/ here
+plugins:
+  acme:
+    domains: [radio.example.com, www.radio.example.com]
+    email: ops@example.com          # optional: Let's Encrypt emails about problems with your certificate
+    accept_terms: true              # you accept the certificate authority's terms of service
+    https_port: 443                 # default 443
+    http_port: 80                   # default 80; 0 when a proxy forwards /.well-known/acme-challenge/ to Lurcast's port
+    redirect_http: false            # true sends every other request on http_port to HTTPS (301)
+    renew_days: 30                  # renew this many days before expiry (default 30)
+    # directory: https://acme-staging-v02.api.letsencrypt.org/directory   # Let's Encrypt staging, for trying it out
+```
+
+Lurcast checks the certificate at startup and every 12 hours. If it can't get one, it logs why and tries again after a minute, then waits twice as long each time, up to 6 hours; streams on the main port keep working meanwhile. HTTPS starts as soon as the first certificate arrives, and renewed certificates are used for new connections without a restart. Listeners use `https://radio.example.com/live`.
+
+- Every domain is on one certificate (up to 100). Wildcards (`*.example.com`) aren't supported, because they need DNS validation.
+- Challenges are also answered on Lurcast's main port, so you can set `http_port: 0` if a proxy already forwards port 80 to Lurcast.
+- Use this plugin or your own certificate (`tls_port`, `tls_cert`, `tls_key`), not both.
+- Ports 80 and 443 need root or `CAP_NET_BIND_SERVICE` (for example `setcap 'cap_net_bind_service=+ep' /usr/local/bin/lurcast`, or `AmbientCapabilities=CAP_NET_BIND_SERVICE` in a systemd unit).
+- Certificates are kept per certificate authority, so moving from the staging directory to the real one gets a new certificate. `kill -HUP` makes Lurcast check the stored certificate again at once; changing the domains or ports needs a restart.
+
+### Transcoding to Opus
+
+Re-encodes a mount as Opus (in Ogg) on another mount, for example a low-bitrate copy of your MP3 stream for listeners on mobile data. It reads MP3, Ogg Vorbis, and Ogg Opus sources. AAC and other formats can't be transcoded: Lurcast logs a warning and doesn't publish the target.
+
+```yaml
+plugins:
+  transcode:
+    - source: /live          # mount to read
+      mount: /live.opus      # mount to publish
+      bitrate: 64            # kbps, 6 to 256 (default 64)
+      channels: 2            # 1 or 2 (default 2)
+    - source: /live
+      mount: /live-mobile.opus
+      bitrate: 24
+      channels: 1
+```
+
+The target mount appears while the source mount has a source connected, and goes away about two seconds after it disconnects (its listeners move to its fallback, if one is set); a source that reconnects within that time keeps the same Opus stream going. Song titles on the source are copied to the target, and the station name, genre, description, and URL are copied when the target starts. Audio is resampled to 48 kHz and encoded in 20 ms Opus frames. Each stream costs a few percent of one CPU core.
+
+Each target must be unique, can't be its own source, and entries can't feed into each other in a loop. Changes to the list apply on a configuration reload (`kill -HUP`), restarting the entries that changed; adding the `transcode` section for the first time needs a restart.
+
+Only permissively licensed codecs are built in, so there is no MP3 or AAC output and no AAC input. Building from source needs libopus (`brew install opus` or `apt install libopus-dev`) and a C compiler: the MP3 and Vorbis decoders and the resampler are in `ext/` and are compiled automatically.
 
 ## Admin and statistics endpoints
 
