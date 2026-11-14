@@ -20,7 +20,8 @@ module Lurcast::Plugins
   #     accept_terms: true
   # ```
   class Acme < Plugin
-    KEY            = "acme"
+    register "acme"
+
     LETS_ENCRYPT   = "https://acme-v02.api.letsencrypt.org/directory"
     CHECK_INTERVAL = 12.hours
     FIRST_RETRY    = 1.minute
@@ -31,13 +32,7 @@ module Lurcast::Plugins
     LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
     DOMAIN      = /\A(?=.{1,253}\z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\z/
 
-    Log = ::Log.for("acme")
-
-    class Settings
-      include YAML::Serializable
-      include YAML::Serializable::Strict
-
-      getter? enabled : Bool = true
+    class Settings < Plugin::Settings
       getter domains : Array(String) = [] of String
       getter email : String?
       getter? accept_terms : Bool = false
@@ -46,62 +41,59 @@ module Lurcast::Plugins
       getter? redirect_http : Bool = false
       getter directory : String = LETS_ENCRYPT
       getter renew_days : Int32 = 30
+
+      # Also normalizes the domain names: lower case, without a trailing dot or duplicates.
+      def validate!(config : Config) : Nil
+        invalid("data_dir is required to keep the account key and certificate") unless config.data_dir.presence
+        if config.tls_port || config.tls_cert || config.tls_key
+          invalid("remove tls_port, tls_cert, and tls_key; use either the acme plugin or your own certificate, not both")
+        end
+        @domains = domains.map(&.strip.downcase.chomp('.')).uniq!
+        validate_domains!
+        invalid("accept_terms must be true to accept the certificate authority's terms of service") unless accept_terms?
+        if email = @email
+          invalid("email #{email.inspect} is not a valid address") unless email.matches?(/\A[^@\s,]+@[^@\s,]+\.[^@\s,]+\z/)
+        end
+        validate_ports!(config)
+        invalid("renew_days must be between 1 and 60") unless 1 <= renew_days <= 60
+        validate_directory!
+      end
+
+      private def validate_domains! : Nil
+        invalid("domains must list at least one domain name") if domains.empty?
+        invalid("domains may list at most #{MAX_DOMAINS} names") if domains.size > MAX_DOMAINS
+        domains.each do |domain|
+          invalid("wildcard domains (#{domain}) need the dns-01 challenge, which is not supported") if domain.includes?('*')
+          invalid("#{domain} is an IP address; certificates are issued for domain names only") if domain.matches?(/\A[\d.]+\z/) || domain.includes?(':')
+          invalid("#{domain} is not a valid domain name") unless DOMAIN.matches?(domain)
+        end
+      end
+
+      private def validate_ports!(config : Config) : Nil
+        invalid("https_port must be between 1 and 65535") unless 1 <= https_port <= 65_535
+        invalid("http_port must be between 0 and 65535 (0 turns it off)") unless 0 <= http_port <= 65_535
+        invalid("redirect_http needs http_port") if redirect_http? && http_port.zero?
+        invalid("https_port and http_port must differ") if https_port == http_port
+        used = {"port" => config.port, "shoutcast_port" => config.shoutcast_port}
+        {"https_port" => https_port, "http_port" => http_port}.each do |name, value|
+          next if value.zero?
+          used.each { |other, port| invalid("#{name} #{value} is already used by #{other}") if port == value }
+        end
+      end
+
+      private def validate_directory! : Nil
+        uri = URI.parse(directory)
+        host = uri.host.presence || invalid("directory must be an https URL")
+        return if uri.scheme == "https"
+        return if uri.scheme == "http" && host.in?(LOCAL_HOSTS)
+        invalid("directory must be an https URL (http is only allowed for localhost)")
+      end
     end
 
     # Raised inside the plugin's fiber when the server stops.
     private class Stopped < Exception
     end
 
-    def self.build(settings : YAML::Any?, config : Config) : Acme?
-      return unless settings
-      parsed = Plugins.parse(Settings, KEY, settings)
-      return unless parsed.enabled?
-      new(config, parsed, validate!(parsed, config))
-    end
-
-    # Checks *settings* and returns the normalized domain list.
-    def self.validate!(settings : Settings, config : Config) : Array(String)
-      error = ->(message : String) { raise ArgumentError.new("plugins.acme: #{message}") }
-      error.call("data_dir is required to keep the account key and certificate") unless config.data_dir.presence
-      if config.tls_port || config.tls_cert || config.tls_key
-        error.call("remove tls_port, tls_cert, and tls_key; use either the acme plugin or your own certificate, not both")
-      end
-      domains = settings.domains.map(&.strip.downcase.chomp('.')).uniq!
-      error.call("domains must list at least one domain name") if domains.empty?
-      error.call("domains may list at most #{MAX_DOMAINS} names") if domains.size > MAX_DOMAINS
-      domains.each do |domain|
-        error.call("wildcard domains (#{domain}) need the dns-01 challenge, which is not supported") if domain.includes?('*')
-        error.call("#{domain} is an IP address; certificates are issued for domain names only") if domain.matches?(/\A[\d.]+\z/) || domain.includes?(':')
-        error.call("#{domain} is not a valid domain name") unless DOMAIN.matches?(domain)
-      end
-      error.call("accept_terms must be true to accept the certificate authority's terms of service") unless settings.accept_terms?
-      if email = settings.email
-        error.call("email #{email.inspect} is not a valid address") unless email.matches?(/\A[^@\s,]+@[^@\s,]+\.[^@\s,]+\z/)
-      end
-      error.call("https_port must be between 1 and 65535") unless 1 <= settings.https_port <= 65_535
-      error.call("http_port must be between 0 and 65535 (0 turns it off)") unless 0 <= settings.http_port <= 65_535
-      error.call("redirect_http needs http_port") if settings.redirect_http? && settings.http_port.zero?
-      error.call("https_port and http_port must differ") if settings.https_port == settings.http_port
-      used = {"port" => config.port, "shoutcast_port" => config.shoutcast_port}
-      {"https_port" => settings.https_port, "http_port" => settings.http_port}.each do |name, value|
-        next if value.zero?
-        used.each { |other, port| error.call("#{name} #{value} is already used by #{other}") if port == value }
-      end
-      error.call("renew_days must be between 1 and 60") unless 1 <= settings.renew_days <= 60
-      validate_directory!(settings.directory, error)
-      domains
-    end
-
-    private def self.validate_directory!(url : String, error : Proc(String, NoReturn)) : Nil
-      uri = URI.parse(url)
-      host = uri.host.presence || error.call("directory must be an https URL")
-      return if uri.scheme == "https"
-      return if uri.scheme == "http" && host.in?(LOCAL_HOSTS)
-      error.call("directory must be an https URL (http is only allowed for localhost)")
-    end
-
-    getter domains : Array(String)
-    getter settings : Settings
     getter challenges = AcmeSupport::Challenges.new
     # The certificate being served, once there is one.
     getter certificate : AcmeSupport::CertificateInfo?
@@ -113,14 +105,14 @@ module Lurcast::Plugins
     @served_pem : String?
     @client : AcmeSupport::Client?
 
-    def initialize(@config : Config, @settings : Settings, @domains : Array(String))
+    def initialize(@config : Config, @settings : Settings)
       @data_dir = @config.data_dir || raise ArgumentError.new("plugins.acme: data_dir is required")
-      @responder = AcmeSupport::HttpResponder.new(@challenges, @domains, @settings.https_port, @settings.redirect_http?)
-      @main_port_responder = AcmeSupport::HttpResponder.new(@challenges, @domains, @settings.https_port, false)
+      @responder = AcmeSupport::HttpResponder.new(@challenges, domains, @settings.https_port, @settings.redirect_http?)
+      @main_port_responder = AcmeSupport::HttpResponder.new(@challenges, domains, @settings.https_port, false)
     end
 
-    def name : String
-      KEY
+    def domains : Array(String)
+      settings.domains
     end
 
     def start(server : IcecastServer) : Nil
@@ -134,8 +126,9 @@ module Lurcast::Plugins
       @https_listener.try { |listener| listener.close rescue nil }
     end
 
-    # Checks the certificate again at once, for example after it was replaced in `data_dir`.
-    def config_reloaded(config : Config) : Nil
+    # Checks the certificate again at once, for example after it was replaced in `data_dir`. Other
+    # changes to the settings need a restart.
+    def reload(settings : Settings?) : Nil
       select
       when @wake.send(nil)
       else
@@ -144,11 +137,10 @@ module Lurcast::Plugins
     end
 
     # Answers http-01 challenges on the main port too, for setups that forward port 80 to it.
-    def handle_request(server : IcecastServer, client : IO, request : HTTP::Request, address : String) : Bool
-      return false unless request.path.starts_with?(AcmeSupport::Challenges::PREFIX)
-      response = @main_port_responder.answer(request)
-      server.respond(client, response.status, response.body, headers: response.headers)
-      true
+    @[Route("GET", AcmeSupport::Challenges::PREFIX, prefix: true)]
+    private def challenge(context : Context) : Nil
+      response = @main_port_responder.answer(context.request)
+      context.server.respond(context.client, response.status, response.body, headers: response.headers)
     end
 
     # The directory holding this CA's account key and certificate.
@@ -170,7 +162,7 @@ module Lurcast::Plugins
           break
         rescue ex
           break if @stopped.get
-          Log.error { "Certificate for #{@domains.join(", ")} not obtained: #{ex.message}; retrying in #{format_span(retry)}" }
+          Log.error { "Certificate for #{domains.join(", ")} not obtained: #{ex.message}; retrying in #{format_span(retry)}" }
           Log.debug(exception: ex) { "ACME failure details" }
           begin
             wait(retry)
@@ -187,7 +179,7 @@ module Lurcast::Plugins
     private def check(server : IcecastServer) : Time::Span
       current = load_certificate
       if reason = renewal_reason(current)
-        Log.info { "Requesting a certificate for #{@domains.join(", ")} from #{@settings.directory} (#{reason})" }
+        Log.info { "Requesting a certificate for #{domains.join(", ")} from #{@settings.directory} (#{reason})" }
         issue
         current = load_certificate
       end
@@ -200,7 +192,7 @@ module Lurcast::Plugins
     # Why the certificate *info* must be replaced, or nil when it is fine.
     def renewal_reason(info : AcmeSupport::CertificateInfo?, now = Time.utc) : String?
       return "no certificate yet" unless info
-      return "the domain list changed" unless info.covers?(@domains)
+      return "the domain list changed" unless info.covers?(domains)
       "it expires #{info.not_after}" if now >= renew_at(info)
     end
 
@@ -221,7 +213,7 @@ module Lurcast::Plugins
         @https_listener = listener
         spawn serve_https(server, listener, context)
       end
-      Log.info { "Certificate for #{@domains.join(", ")} valid until #{info.not_after}, served on port #{@settings.https_port}" }
+      Log.info { "Certificate for #{domains.join(", ")} valid until #{info.not_after}, served on port #{@settings.https_port}" }
       @served_pem = pem
       @certificate = info
     end
@@ -271,7 +263,7 @@ module Lurcast::Plugins
       certificate_key = AcmeSupport::Key.generate
       client = @client ||= AcmeSupport::Client.new(@settings.directory, account_key, @challenges, tls: ca_context,
         sleeper: ->(span : Time::Span) { wait(span) })
-      chain = client.obtain(@domains, certificate_key, @settings.email)
+      chain = client.obtain(domains, certificate_key, @settings.email)
       unless AcmeSupport::CertificateInfo.parse(chain, certificate_key)
         raise "The CA returned a certificate that does not match the key"
       end
@@ -313,9 +305,7 @@ module Lurcast::Plugins
       directory = File.dirname(path)
       Dir.mkdir_p(directory, 0o700)
       {File.dirname(directory), directory}.each { |dir| File.chmod(dir, 0o700) }
-      temporary = "#{path}.#{Random::Secure.hex(4)}.tmp"
-      File.write(temporary, content, perm: 0o600)
-      File.rename(temporary, path)
+      Plugin.write_file(path, content)
     end
 
     private def account_key_path : String

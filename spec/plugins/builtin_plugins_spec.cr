@@ -114,7 +114,7 @@ describe Lurcast::Plugins::CoverArt do
     head, _ = http(port, "POST /admin/artwork/remove?mount=/live&type=station", "Authorization: #{ADMIN}\r\n")
     head.should start_with("HTTP/1.0 200")
     http(port, "GET /_lurcast/art/live")[0].should start_with("HTTP/1.0 404")
-    Dir.children(File.join(dir, "artwork")).should be_empty
+    Dir.children(File.join(dir, "cover_art")).should be_empty
   ensure
     source.try(&.close)
     server.try(&.stop)

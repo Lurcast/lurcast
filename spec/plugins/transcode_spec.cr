@@ -8,18 +8,23 @@ private def transcode_fixture(name : String) : Bytes
   File.read(File.join(__DIR__, "..", "fixtures", "transcode", name)).to_slice
 end
 
+# A `plugins.transcode` section with *yaml* as its list of streams.
+private def streams(yaml : String) : YAML::Any
+  YAML.parse({"streams" => YAML.parse(yaml)}.to_yaml)
+end
+
 private def transcode_config(yaml : String) : Config
   config = Config.new
   config.host = "127.0.0.1"
   config.source_password = "secret"
   config.admin_password = "admin"
   config.max_connections_per_ip = 20
-  config.plugins = {"transcode" => YAML.parse(yaml)}
+  config.plugins = {"transcode" => streams(yaml)}
   config
 end
 
 private def build_transcode(yaml : String) : Transcode?
-  Transcode.build(YAML.parse(yaml), Config.new)
+  Transcode.build(yaml.empty? ? nil : streams(yaml), Config.new)
 end
 
 # Splits Ogg data into pages; libogg checks each page's CRC, so a bad checksum loses the page.
@@ -139,7 +144,7 @@ describe Lurcast::Plugins::Transcode do
       "- {source: /live, mount: /live.opus, bitrate: 257}"                          => "6 to 256 kbps",
       "- {source: /live, mount: /live.opus, channels: 6}"                           => "must be 1 or 2",
       "- {source: /live, mount: /live.opus, codec: aac}"                            => "must be opus",
-      "[{source: /live, mount: /x.opus}, {source: /other, mount: /x.opus}]"         => "more than one entry",
+      "[{source: /live, mount: /x.opus}, {source: /other, mount: /x.opus}]"         => "more than one stream",
       "[{source: /a, mount: /b}, {source: /b, mount: /a}]"                          => "feeds back into itself",
       "[{source: /a, mount: /b}, {source: /b, mount: /c}, {source: /c, mount: /a}]" => "feeds back into itself",
       "- {source: /live, mount: /live.opus, quality: 10}"                           => "Invalid plugins.transcode",
@@ -150,7 +155,7 @@ describe Lurcast::Plugins::Transcode do
     end
 
     config = Config.new
-    config.plugins = {"transcode" => YAML.parse("- {source: /live, mount: /live, bitrate: 64}")}
+    config.plugins = {"transcode" => streams("- {source: /live, mount: /live, bitrate: 64}")}
     expect_raises(ArgumentError, "can't transcode itself") { Lurcast::Plugins.validate!(config) }
   end
 
@@ -256,7 +261,7 @@ describe Lurcast::Plugins::Transcode do
       wait_until { target.current_song == "Artist - Second" }
 
       # A changed entry restarts its transcoder with the new settings.
-      config.plugins = {"transcode" => YAML.parse("- {source: /live, mount: /live.opus, bitrate: 32}")}
+      config.plugins = {"transcode" => streams("- {source: /live, mount: /live.opus, bitrate: 32}")}
       plugin.config_reloaded(config)
       wait_until(5.seconds) { server.get_mount("/live.opus").try(&.bitrate) == 32 }
       wait_until { server.get_mount("/live.opus").try(&.current_song) == "Artist - Second" }

@@ -159,17 +159,12 @@ module Lurcast::Plugins
       @users = users
       @mtime = info.modification_time
     rescue ex : IO::Error
-      Log.error { "Could not read the listener logins in #{@path}: #{ex.message}" }
+      ListenerLogins::Log.error { "Could not read the listener logins in #{@path}: #{ex.message}" }
     end
 
     private def write : Nil
-      directory = File.dirname(@path)
-      Dir.mkdir_p(directory)
-      temporary = File.join(directory, ".#{File.basename(@path)}.#{Random::Secure.hex(4)}.tmp")
-      File.open(temporary, "w", perm: 0o600) do |file|
-        @users.each { |user, hash| file << user << ':' << hash << '\n' }
-      end
-      File.rename(temporary, @path)
+      content = String.build { |io| @users.each { |user, hash| io << user << ':' << hash << '\n' } }
+      Plugin.write_file(@path, content)
       @mtime = File.info(@path).modification_time
     end
   end

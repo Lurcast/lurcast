@@ -282,7 +282,7 @@ curl --user admin:admin123 -H 'Content-Type: image/png' --data-binary @logo.png 
 curl --user admin:admin123 -X POST 'http://localhost:8000/admin/artwork/remove?mount=/live&type=playing'
 ```
 
-Images are JPEG, PNG, GIF, WebP, or BMP, up to 1 MB. With `data_dir` set, station logos are kept in `artwork/` there and survive restarts; song covers are kept in memory. Turn the plugin off with `plugins: {cover_art: {enabled: false}}`.
+Images are JPEG, PNG, GIF, WebP, or BMP, up to 1 MB. With `data_dir` set, station logos are kept in `cover_art/` there and survive restarts; song covers are kept in memory. Turn the plugin off with `plugins: {cover_art: {enabled: false}}`.
 
 ### Listener logins
 
@@ -340,21 +340,55 @@ Re-encodes a mount as Opus (in Ogg) on another mount, for example a low-bitrate 
 ```yaml
 plugins:
   transcode:
-    - source: /live          # mount to read
-      mount: /live.opus      # mount to publish
-      bitrate: 64            # kbps, 6 to 256 (default 64)
-      channels: 2            # 1 or 2 (default 2)
-    - source: /live
-      mount: /live-mobile.opus
-      bitrate: 24
-      channels: 1
+    streams:
+      - source: /live          # mount to read
+        mount: /live.opus      # mount to publish
+        bitrate: 64            # kbps, 6 to 256 (default 64)
+        channels: 2            # 1 or 2 (default 2)
+      - source: /live
+        mount: /live-mobile.opus
+        bitrate: 24
+        channels: 1
 ```
 
 The target mount appears while the source mount has a source connected, and goes away about two seconds after it disconnects (its listeners move to its fallback, if one is set); a source that reconnects within that time keeps the same Opus stream going. Song titles on the source are copied to the target, and the station name, genre, description, and URL are copied when the target starts. Audio is resampled to 48 kHz and encoded in 20 ms Opus frames. Each stream costs a few percent of one CPU core.
 
-Each target must be unique, can't be its own source, and entries can't feed into each other in a loop. Changes to the list apply on a configuration reload (`kill -HUP`), restarting the entries that changed; adding the `transcode` section for the first time needs a restart.
+Each target must be unique, can't be its own source, and streams can't feed into each other in a loop. Changes to the list apply on a configuration reload (`kill -HUP`), restarting the streams that changed; adding the `transcode` section for the first time needs a restart.
 
 Only permissively licensed codecs are built in, so there is no MP3 or AAC output and no AAC input. Building from source needs libopus (`brew install opus` or `apt install libopus-dev`) and a C compiler: the MP3 and Vorbis decoders and the resampler are in `ext/` and are compiled automatically.
+
+### Writing a plugin
+
+A plugin is a subclass of `Lurcast::Plugin` in its own file under `src/plugins/`; it is found and built in at compile time. `register` names its section under `plugins:`, a `Settings` subclass lists the settings with their defaults, and methods marked with `@[Route]` answer requests:
+
+```crystal
+module Lurcast::Plugins
+  class Greeter < Plugin
+    register "greeter"   # add `enabled_by_default: true` to build it without a section
+
+    class Settings < Plugin::Settings
+      getter greeting : String = "Hello"
+
+      def validate!(config : Config) : Nil
+        invalid("greeting must not be empty") if greeting.empty?
+      end
+    end
+
+    @[Route("GET", "/hello")]
+    private def hello(context : Context) : Nil
+      context.text("#{settings.greeting}, #{context.param("name")}")
+    end
+
+    @[Route("POST", "/admin/greeting", admin: true)]   # asks for an admin login first
+    private def change(context : Context) : Nil
+      mount = context.mount   # the ?mount= the login may manage, or a 404
+      context.json({mount: mount, user: context.access.user})
+    end
+  end
+end
+```
+
+Every section also takes `enabled: false`, and unknown settings are an error that names the plugin. `GET` routes answer `HEAD` too, `prefix: true` matches every path under the given one, and `context.halt(404, "message")` ends a route with a JSON error. A plugin gets the server's hooks (`start`, `stop`, `song_changed`, `listener_challenge`, `artwork_received`, and others in `src/extension.cr`) by overriding them, and `reload(settings)` after a configuration reload, with nil when the section was removed. Each plugin logs as `lurcast.plugins.<name>` and keeps its files in `data_dir/<name>/`.
 
 ## Admin and statistics endpoints
 

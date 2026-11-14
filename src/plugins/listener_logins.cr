@@ -19,27 +19,23 @@ module Lurcast::Plugins
   # Admins manage the users from the dashboard or with `/admin/api/listener-logins`,
   # `POST /admin/listener-logins` and `POST /admin/listener-logins/remove`.
   class ListenerLogins < Plugin
-    KEY      = "listener_logins"
+    register "listener_logins"
+
     ALL      = "*"
     REMEMBER = 10.minutes
 
-    class Settings
-      include YAML::Serializable
-      include YAML::Serializable::Strict
-
+    class Settings < Plugin::Settings
       getter mounts : Hash(String, String) = {} of String => String
       getter realm : String = "Lurcast Listener"
 
-      def validate! : Nil
-        raise ArgumentError.new("plugins.listener_logins.mounts must list at least one mount") if mounts.empty?
+      def validate!(config : Config) : Nil
+        invalid("mounts must list at least one mount") if mounts.empty?
         mounts.each do |mount, path|
-          unless mount == ALL || (mount.starts_with?('/') && mount.size > 1)
-            raise ArgumentError.new("plugins.listener_logins mount #{mount} must start with / (or be \"*\")")
-          end
-          raise ArgumentError.new("plugins.listener_logins file for #{mount} must not be empty") if path.strip.empty?
-          raise ArgumentError.new("plugins.listener_logins file for #{mount} is a directory") if Dir.exists?(path)
+          invalid("mount #{mount} must start with / (or be \"*\")") unless mount == ALL || (mount.starts_with?('/') && mount.size > 1)
+          invalid("the file for #{mount} must not be empty") if path.strip.empty?
+          invalid("the file for #{mount} is a directory") if Dir.exists?(path)
         end
-        raise ArgumentError.new("plugins.listener_logins realm must not be empty or contain quotes") if realm.empty? || realm.includes?('"')
+        invalid("realm must not be empty or contain quotes") if realm.empty? || realm.includes?('"')
       end
     end
 
@@ -47,29 +43,26 @@ module Lurcast::Plugins
       include JSON::Serializable
     end
 
-    def self.build(settings : YAML::Any?, config : Config) : ListenerLogins?
-      return unless settings
-      parsed = Plugins.parse(Settings, KEY, settings)
-      parsed.validate!
-      new(parsed)
-    end
-
     @files = {} of String => Htpasswd
     @verified = {} of String => Time::Instant
     @mutex = Mutex.new
     @key : Bytes = Random::Secure.random_bytes(32)
 
-    def initialize(@settings : Settings)
-      apply(@settings)
+    def initialize(@config : Config, @settings : Settings)
+      reload(@settings)
     end
 
-    def name : String
-      KEY
-    end
-
-    def config_reloaded(config : Config) : Nil
-      settings = config.plugins[KEY]?.try { |section| Plugins.parse(Settings, KEY, section) }
-      apply(settings || Settings.from_yaml("mounts: {}"))
+    # Takes the new password files; a removed section turns the logins off.
+    def reload(settings : Settings?) : Nil
+      @mutex.synchronize do
+        @settings = settings if settings
+        mounts = settings.try(&.mounts) || {} of String => String
+        @files = mounts.to_h do |mount, path|
+          existing = @files[mount]?
+          {mount, existing && existing.path == path ? existing : Htpasswd.new(path)}
+        end
+        @verified.clear
+      end
     end
 
     # The password file that protects *mount*, if any.
@@ -84,29 +77,53 @@ module Lurcast::Plugins
       verified?(file, user, password) ? nil : realm
     end
 
-    def handle_request(server : IcecastServer, client : IO, request : HTTP::Request, address : String) : Bool
-      case {request.method, request.path}
-      when {"GET", "/admin/api/listener-logins"}
-        list(server, client, request)
-      when {"POST", "/admin/listener-logins"}
-        change(server, client, request, remove: false)
-      when {"POST", "/admin/listener-logins/remove"}
-        change(server, client, request, remove: true)
-      else
-        return false
-      end
-      true
+    # `GET /admin/api/listener-logins?mount=/private`: the users who may listen to the mount.
+    @[Route("GET", "/admin/api/listener-logins", admin: true)]
+    private def list(context : Context) : Nil
+      mount, file = target(context)
+      context.json(UserList.new(mount, file.path, file.users))
     end
 
-    private def apply(settings : Settings) : Nil
-      @mutex.synchronize do
-        @settings = settings
-        @files = settings.mounts.to_h do |mount, path|
-          existing = @files[mount]?
-          {mount, existing && existing.path == path ? existing : Htpasswd.new(path)}
-        end
-        @verified.clear
-      end
+    # `POST /admin/listener-logins?mount=/private&user=anna&password=...` adds a user or changes the
+    # password.
+    @[Route("POST", "/admin/listener-logins", admin: true)]
+    private def save(context : Context) : Nil
+      mount, file = target(context)
+      user = context.param("user")
+      password = context.params["password"]? || ""
+      context.halt(400, "The password must be at least 4 characters") if password.size < 4
+      changing(context, mount) { file.set(user, password) }
+      Log.info { "Saved listener login #{user} for #{mount}" }
+      context.text("Login saved")
+    end
+
+    # `POST /admin/listener-logins/remove?mount=/private&user=anna`.
+    @[Route("POST", "/admin/listener-logins/remove", admin: true)]
+    private def remove(context : Context) : Nil
+      mount, file = target(context)
+      user = context.param("user")
+      context.halt(404, "No such user") unless changing(context, mount) { file.delete(user) }
+      Log.info { "Removed listener login #{user} from #{mount}" }
+      context.text("Login removed")
+    end
+
+    private def changing(context : Context, mount : String, &)
+      yield
+    rescue ex : ArgumentError
+      context.halt(400, ex.message || "Invalid login")
+    rescue ex : IO::Error
+      Log.error { "Could not change the listener logins of #{mount}: #{ex.message}" }
+      context.halt(500, "Could not save the file")
+    end
+
+    # The mount an admin request names and its password file. Logins limited to some mounts can
+    # manage only files for their own mounts, not the shared `*` file.
+    private def target(context : Context) : Tuple(String, Htpasswd)
+      mount = context.mount
+      own = @mutex.synchronize { @files[mount]? }
+      file = own || (context.access.full? ? file_for(mount) : nil)
+      context.halt(404, "This stream has no listener logins") unless file
+      {mount, file}
     end
 
     # bcrypt is slow on purpose and HLS players send the login with every segment, so a login that
@@ -137,55 +154,6 @@ module Lurcast::Plugins
       {user, password} unless separator.empty?
     rescue Base64::Error
       nil
-    end
-
-    # `GET /admin/api/listener-logins?mount=/private`: the users who may listen to the mount.
-    private def list(server : IcecastServer, client : IO, request : HTTP::Request) : Nil
-      mount, file = target(server, client, request) || return
-      body = UserList.new(mount, file.path, file.users).to_json
-      server.respond(client, 200, body, "application/json", HTTP::Headers{"Cache-Control" => "no-store"})
-    end
-
-    # `POST /admin/listener-logins?mount=/private&user=anna&password=...` adds a user or changes the
-    # password; `POST /admin/listener-logins/remove?mount=/private&user=anna` removes one.
-    private def change(server : IcecastServer, client : IO, request : HTTP::Request, remove : Bool) : Nil
-      mount, file = target(server, client, request) || return
-      params = request.query_params
-      user = params["user"]?.try(&.strip) || ""
-      return error(server, client, 400, "user is required") if user.empty?
-      if remove
-        return error(server, client, 404, "No such user") unless file.delete(user)
-        Log.info { "Removed listener login #{user} from #{mount}" }
-        server.respond(client, 200, "Login removed")
-      else
-        password = params["password"]? || ""
-        return error(server, client, 400, "The password must be at least 4 characters") if password.size < 4
-        file.set(user, password)
-        Log.info { "Saved listener login #{user} for #{mount}" }
-        server.respond(client, 200, "Login saved")
-      end
-    rescue ex : ArgumentError
-      error(server, client, 400, ex.message || "Invalid login")
-    rescue ex : IO::Error
-      Log.error { "Could not change the listener logins of #{mount}: #{ex.message}" }
-      error(server, client, 500, "Could not save the file")
-    end
-
-    # The mount an admin request names and its password file. Logins limited to some mounts can
-    # manage only files for their own mounts, not the shared `*` file.
-    private def target(server : IcecastServer, client : IO, request : HTTP::Request) : Tuple(String, Htpasswd)?
-      access = server.admin_login(request.headers)
-      return server.challenge(client, "Lurcast Admin") unless access
-      mount = request.query_params["mount"]?.try { |value| server.mount_name(value) }
-      return error(server, client, 404, "Stream not found") unless mount && access.allows?(mount)
-      own = @mutex.synchronize { @files[mount]? }
-      file = own || (access.full? ? file_for(mount) : nil)
-      return error(server, client, 404, "This stream has no listener logins") unless file
-      {mount, file}
-    end
-
-    private def error(server : IcecastServer, client : IO, status : Int32, message : String) : Nil
-      server.respond(client, status, {error: message}.to_json, "application/json", HTTP::Headers{"Cache-Control" => "no-store"})
     end
   end
 end
