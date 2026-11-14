@@ -42,8 +42,6 @@ class IcecastServer
   @servers = Set(TCPServer).new
   @servers_mutex = Mutex.new
   @services_started = Atomic(Bool).new(false)
-  @yp_loops = Set(Tuple(UInt64, String)).new
-  @yp_loops_mutex = Mutex.new
   @next_listener_id = Atomic(Int64).new(0_i64)
   @relays = {} of String => RelayConfig
   @relay_demand = Hash(String, Int32).new(0)
@@ -349,14 +347,11 @@ class IcecastServer
     input.rewind
     update = RadioAPI::Update.from_json(input)
     update.validate!
-    was_listed = mountpoint.listed
     mountpoint.update_station(update.name, update.description, update.genre, update.url, update.listed)
     if current_song = update.current_song
       mountpoint.update_metadata(current_song)
     end
-    if !was_listed && mountpoint.listed
-      @config.yp_urls.each { |url| start_yp_loop(mountpoint, url) }
-    end
+    notify_extensions("apply a station update on #{mount}", &.station_updated(mount, mountpoint))
     response = RadioAPI.render_station(@config.public_url, mountpoint, artwork_url(mount))
     send_json(client, response, headers)
   rescue ex : JSON::ParseException | ArgumentError
@@ -419,7 +414,10 @@ class IcecastServer
       send_banned(client, head)
       return
     end
-    if realm = listener_challenge(mount, headers, client_ip)
+    listener_id = next_listener_id
+    listener_request = Lurcast::ListenerRequest.new(listener_id, mount, client_ip, headers)
+    challenged = true
+    if realm = listener_challenge(listener_request)
       request_authentication(client, realm)
       return
     end
@@ -436,21 +434,6 @@ class IcecastServer
     unless mountpoint
       send_response(client, 404, "Stream not found")
       return
-    end
-
-    listener_id = next_listener_id
-    if @config.auth_url
-      listener_credentials = basic_credentials(headers) || {"", ""}
-      user, password = listener_credentials
-      params = external_params("listener_add", mount, client_ip, user, password)
-      params["client"] = listener_id.to_s
-      params["agent"] = user_agent
-      unless external_authorized?(params)
-        request_authentication(client, "Lurcast Listener")
-        return
-      end
-      externally_authorized = true
-      listener_started = Time.instant
     end
 
     reservation = reserve_listener(mountpoint)
@@ -500,7 +483,8 @@ class IcecastServer
 
     country = listener_country(client_ip)
     listener = mountpoint.add_listener(client, client_ip, wants_metadata, mount, id: listener_id, user_agent: user_agent, intro: intro_audio(mount), country: country)
-    emit(Webhooks::ListenerConnected.new(mount, listener_id, client_ip, user_agent, country))
+    connection = Lurcast::ListenerConnection.new(listener_id, mount, client_ip, user_agent, country)
+    notify_extensions("record a new listener", &.listener_connected(connection))
     activate_listener(mountpoint)
     listener_attached = true
     if relay_requested
@@ -520,16 +504,10 @@ class IcecastServer
     release_listener_address(address) if listener_ip_held
     if listener
       note_response(client, 200, listener.bytes_sent)
-      emit(Webhooks::ListenerDisconnected.new(mount, listener.id, listener.address, listener.user_agent, listener.country,
-        listener.connected_seconds, listener.bytes_sent))
       report_listener_session(listener, mount)
     end
-    if externally_authorized && listener_id && listener_started
-      user, password = listener_credentials || {"", ""}
-      params = external_params("listener_remove", mount, client_ip || address, user, password)
-      params["client"] = listener_id.to_s
-      params["duration"] = (Time.instant - listener_started).total_seconds.to_i.to_s
-      external_notify(params)
+    if challenged && listener_request
+      notify_extensions("record a listener leaving", &.listener_closed(listener_request))
     end
   end
 
@@ -670,10 +648,9 @@ class IcecastServer
         .flat_map(&.detach_listeners(mount))
       mountpoint.adopt_listeners(returning)
     end
-    external_notify(external_params("mount_add", mount)) if mountpoint
-    source_connected(mount, mountpoint) if mountpoint
-    if mountpoint && mountpoint.listed
-      @config.yp_urls.each { |url| start_yp_loop(mountpoint, url) }
+    if mountpoint
+      notify_extensions("start a source on #{mount}", &.source_connected(mount, mountpoint))
+      source_connected(mount, mountpoint)
     end
     mountpoint
   end
@@ -690,7 +667,7 @@ class IcecastServer
     return unless released
 
     mountpoint.disconnect_source
-    external_notify(external_params("mount_remove", mount))
+    notify_extensions("end a source on #{mount}", &.source_disconnected(mount, mountpoint))
     source_disconnected(mount, mountpoint)
     listeners = mountpoint.detach_listeners
     if running? && (fallback = resolve_mount(@config.fallback_for(mount), mountpoint))
@@ -743,7 +720,7 @@ class IcecastServer
       return get_mount(mount).try { |existing| existing if existing.has_source? && (!compatible_with || existing.compatible_with?(compatible_with)) }
     end
 
-    external_notify(external_params("mount_add", mount))
+    notify_extensions("start a source on #{mount}", &.source_connected(mount, point))
     spawn fallback_file_loop(mount, point, file)
     point
   rescue ex : File::Error
@@ -766,11 +743,15 @@ class IcecastServer
 
   private def notify_song_change(mount : String, point : MountPoint, song : String, at : Time) : Nil
     listeners = point.listener_count
-    emit(Webhooks::SongChanged.new(mount, song, listeners))
+    notify_extensions("record a song change on #{mount}", &.song_changed(mount, song, listeners, at))
+  end
+
+  # Calls *block* with every extension, logging the failures of one without stopping the others.
+  private def notify_extensions(action : String, &)
     @extensions.each do |extension|
-      extension.song_changed(mount, song, listeners, at)
+      yield extension
     rescue ex
-      Log.error(exception: ex) { "Extension failed to record a song change on #{mount}" }
+      Log.error(exception: ex) { "Extension failed to #{action}" }
     end
   end
 
@@ -905,155 +886,28 @@ class IcecastServer
   end
 
   private def source_credentials_authorized?(mount : String, address : String, user : String, password : String, admin = false) : Bool
-    unless @config.auth_url
-      return {user, password} == @config.source_credentials_for(mount)
-    end
-
-    params = external_params("stream_auth", mount, address, user, password)
-    params["admin"] = admin ? "1" : "0"
-    external_authorized?(params)
+    decided = source_login(mount, address, user, password, admin)
+    return decided unless decided.nil?
+    {user, password} == @config.source_credentials_for(mount)
   end
 
+  # SHOUTcast sources send only a password, unless an extension checks the login.
   private def uvox_source_authorized?(mount : String, address : String, user : String, password : String) : Bool
-    return password == @config.source_credentials_for(mount)[1] unless @config.auth_url
-    source_credentials_authorized?(mount, address, user, password)
+    decided = source_login(mount, address, user, password, false)
+    return decided unless decided.nil?
+    password == @config.source_credentials_for(mount)[1]
   end
 
-  private def external_params(action : String, mount : String, address = "", user = "", password = "") : Hash(String, String)
-    {
-      "action" => action,
-      "server" => @config.hostname,
-      "port"   => @config.port.to_s,
-      "mount"  => mount,
-      "user"   => user,
-      "pass"   => password,
-      "ip"     => address,
-    }
-  end
-
-  private def external_authorized?(params : Hash(String, String)) : Bool
-    response = external_post(params)
-    return false unless response
-    response.status.success? && response.headers[@config.auth_header]? == "1"
-  end
-
-  private def external_notify(params : Hash(String, String))
-    return unless @config.auth_url
-    response = external_post(params)
-    Log.warn { "Auth callback #{params["action"]} returned #{response.status_code}" } if response && !response.status.success?
-  end
-
-  private def external_post(params : Hash(String, String)) : HTTP::Client::Response?
-    url = @config.auth_url
-    return unless url
-    post_form(url, params, @config.auth_timeout)
-  rescue ex
-    Log.warn { "Auth callback failed: #{ex.message}" }
+  private def source_login(mount : String, address : String, user : String, password : String, admin : Bool) : Bool?
+    @extensions.each do |extension|
+      decided = extension.source_login(mount, address, user, password, admin)
+      return decided unless decided.nil?
+    end
     nil
   end
 
   private def next_listener_id : Int64
     @next_listener_id.add(1_i64) + 1
-  end
-
-  private def yp_loop(mountpoint : MountPoint, url : String)
-    while yp_active?(mountpoint)
-      sid = nil.as(String?)
-      begin
-        response = post_form(url, yp_add_params(mountpoint), @config.yp_timeout)
-        raise IO::Error.new("YP add rejected") unless yp_success?(response)
-        sid = response.headers["SID"]? || raise IO::Error.new("YP add did not return a SID")
-        raise IO::Error.new("YP add did not return a SID") if sid.empty?
-        interval = yp_touch_frequency(response)
-
-        while yp_active?(mountpoint)
-          yp_sleep(interval, mountpoint)
-          break unless yp_active?(mountpoint)
-          response = post_form(url, yp_touch_params(mountpoint, sid), @config.yp_timeout)
-          raise IO::Error.new("YP touch rejected") unless yp_success?(response)
-          interval = yp_touch_frequency(response, interval)
-        end
-      rescue ex
-        Log.warn { "YP directory #{url} failed for #{mountpoint.mount}: #{ex.message}" }
-      ensure
-        if sid
-          begin
-            post_form(url, {"action" => "remove", "sid" => sid}, @config.yp_timeout)
-          rescue ex
-            Log.warn { "YP remove failed for #{mountpoint.mount}: #{ex.message}" }
-          end
-        end
-      end
-      yp_sleep(@config.yp_touch_interval, mountpoint) if yp_active?(mountpoint)
-    end
-  end
-
-  private def start_yp_loop(mountpoint : MountPoint, url : String)
-    key = {mountpoint.object_id, url}
-    return unless @yp_loops_mutex.synchronize { @yp_loops.add?(key) }
-
-    spawn do
-      yp_loop(mountpoint, url)
-    ensure
-      @yp_loops_mutex.synchronize { @yp_loops.delete(key) }
-      start_yp_loop(mountpoint, url) if yp_active?(mountpoint)
-    end
-  end
-
-  private def yp_add_params(mountpoint : MountPoint) : Hash(String, String)
-    details = mountpoint.station_details
-    {
-      "action"    => "add",
-      "sn"        => details.name,
-      "type"      => mountpoint.content_type,
-      "genre"     => details.genre,
-      "b"         => mountpoint.bitrate.to_s,
-      "listenurl" => "#{@config.public_url.rstrip('/')}#{mountpoint.mount}",
-      "desc"      => details.description,
-      "url"       => details.url,
-      "email"     => @config.admin_email,
-    }
-  end
-
-  private def yp_touch_params(mountpoint : MountPoint, sid : String) : Hash(String, String)
-    {
-      "action"        => "touch",
-      "sid"           => sid,
-      "st"            => mountpoint.current_song,
-      "listeners"     => mountpoint.listener_count.to_s,
-      "max_listeners" => @config.max_listeners.to_s,
-    }
-  end
-
-  private def yp_success?(response : HTTP::Client::Response) : Bool
-    response.status.success? && response.headers["YPResponse"]? == "1"
-  end
-
-  private def yp_touch_frequency(response : HTTP::Client::Response, fallback = @config.yp_touch_interval) : Int32
-    interval = response.headers["TouchFreq"]?.try(&.to_i?)
-    interval && interval.positive? ? interval : fallback
-  end
-
-  private def yp_active?(mountpoint : MountPoint) : Bool
-    running? && get_mount(mountpoint.mount) == mountpoint && mountpoint.has_source? && mountpoint.listed
-  end
-
-  private def yp_sleep(seconds : Int32, mountpoint : MountPoint)
-    deadline = Time.instant + seconds.seconds
-    while yp_active?(mountpoint)
-      remaining = deadline - Time.instant
-      break unless remaining.positive?
-      sleep Math.min(remaining, 100.milliseconds)
-    end
-  end
-
-  private def post_form(url : String, params : Hash(String, String), timeout : Int32) : HTTP::Client::Response
-    uri = URI.parse(url)
-    HTTP::Client.new(uri) do |client|
-      client.connect_timeout = timeout.seconds
-      client.read_timeout = timeout.seconds
-      client.post(uri.request_target, form: params) { |response| response }
-    end
   end
 
   private def request_authentication(client : IO, realm : String)
@@ -1295,9 +1149,9 @@ class IcecastServer
 
   # The realm to ask a listener of *mount* to sign in to, when an extension protects the mount and the
   # request has no valid login.
-  def listener_challenge(mount : String, headers : HTTP::Headers, address : String) : String?
+  def listener_challenge(request : Lurcast::ListenerRequest) : String?
     @extensions.each do |extension|
-      if realm = extension.listener_challenge(mount, headers, address)
+      if realm = extension.listener_challenge(request)
         return realm
       end
     end

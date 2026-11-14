@@ -1,7 +1,5 @@
-require "../access_log"
 require "../hls"
 require "../recording"
-require "../webhooks"
 
 class IcecastServer
   # Where `reload_config` reads the configuration from; set by the command-line runner.
@@ -39,10 +37,8 @@ class IcecastServer
     getter started = Time.instant
   end
 
-  @access_log : AccessLog?
   @access_states = {} of IO => AccessState
   @access_mutex = Mutex.new
-  @webhooks : Webhooks?
   @recordings = {} of String => Recording
   @recordings_mutex = Mutex.new
   @hls_taps = {} of String => HLSTap
@@ -56,15 +52,11 @@ class IcecastServer
   private def setup_features
     setup_bans_and_history
     @trusted_proxies = TrustedProxies.new(@config.trusted_proxies)
-    @access_log = @config.access_log.try { |path| AccessLog.new(path) }
-    @webhooks = Webhooks.new(@config.webhooks, @config.public_url, SERVER_ID, @config.webhook_timeout.seconds)
   end
 
   private def stop_features
     @history.save
     @recordings_mutex.synchronize { @recordings.values.tap { @recordings.clear } }.each(&.stop)
-    @webhooks.try(&.close)
-    @access_log.try(&.close)
   end
 
   # ---------- Configuration reload ----------
@@ -94,24 +86,14 @@ class IcecastServer
       end
       Log.info { "Configuration reloaded from #{path}" }
       Log.warn { "Restart to apply: #{restart.join(", ")}" } unless restart.empty?
-      emit(Webhooks::ConfigReloaded.new(restart))
+      notify_extensions("apply the reloaded configuration", &.reload_finished(restart))
       ReloadResult.new(true, restart_required: restart)
     end
   end
 
   private def reload_features
-    if @access_log.try(&.path) == @config.access_log
-      @access_log.try(&.reopen)
-    else
-      old = @access_log
-      @access_log = @config.access_log.try { |path| AccessLog.new(path) }
-      old.try(&.close)
-    end
     @trusted_proxies = TrustedProxies.new(@config.trusted_proxies)
     @bans.load
-    old_webhooks = @webhooks
-    @webhooks = Webhooks.new(@config.webhooks, @config.public_url, SERVER_ID, @config.webhook_timeout.seconds)
-    old_webhooks.try(&.close)
     streams.each do |stream|
       next if !stream.has_source? || stream.source_protocol.file?
       start_recording(stream) if @config.record?(stream.mount)
@@ -156,16 +138,21 @@ class IcecastServer
     @relays_mutex.synchronize { @relays.has_key?(mount) }
   end
 
-  # ---------- Access log ----------
+  # ---------- Request logs ----------
+
+  # Whether an extension wants `request_finished` for each request.
+  private def request_logging? : Bool
+    @extensions.any?(&.logs_requests?)
+  end
 
   private def begin_access(client : IO)
-    return unless @access_log
+    return unless request_logging?
     @access_mutex.synchronize { @access_states[client] = AccessState.new }
   end
 
-  # Remembers the status and size of the response written to *client*, for the access log.
+  # Remembers the status and size of the response written to *client*, for request logs.
   private def note_response(client : IO, status : Int32, bytes : Int64)
-    return unless @access_log
+    return unless request_logging?
     @access_mutex.synchronize do
       if state = @access_states[client]?
         state.status = status
@@ -175,11 +162,10 @@ class IcecastServer
   end
 
   private def finish_access(client : IO, request : HTTP::Request, address : String)
-    log = @access_log
     state = @access_mutex.synchronize { @access_states.delete(client) }
-    return unless log && state
+    return unless state
     headers = request.headers
-    log.log(AccessLog::Entry.new(
+    record = Lurcast::RequestRecord.new(
       address: client_address(headers, address),
       user: basic_credentials(headers).try(&.[0]),
       started_at: state.started_at,
@@ -191,26 +177,18 @@ class IcecastServer
       referer: headers["Referer"]?,
       user_agent: headers["User-Agent"]?,
       duration: Time.instant - state.started,
-    ))
-  end
-
-  # ---------- Webhooks ----------
-
-  private def emit(data) : Nil
-    @webhooks.try(&.emit(data))
+    )
+    notify_extensions("log a request") { |extension| extension.request_finished(record) if extension.logs_requests? }
   end
 
   private def source_connected(mount : String, point : MountPoint)
     return if point.source_protocol.file?
-    details = point.station_details
-    emit(Webhooks::SourceConnected.new(mount, point.source_protocol, point.content_type, point.bitrate, details.name, details.genre))
     start_recording(point) if @config.record?(mount)
     start_hls(point) if @config.hls_for?(mount)
   end
 
   private def source_disconnected(mount : String, point : MountPoint)
     return if point.source_protocol.file?
-    emit(Webhooks::SourceDisconnected.new(mount, point.uptime_seconds, point.listener_stats[1]))
     stop_recording(mount)
     stop_hls(mount)
   end
@@ -257,7 +235,7 @@ class IcecastServer
       @recordings[point.mount] = Recording.new(point.mount, directory, Recording.extension_for(point.content_type),
         split.positive? && splittable ? split.minutes : nil, manual) do |file|
         Log.info { "Recorded #{file.path} (#{file.bytes} bytes)" }
-        emit(Webhooks::RecordingFinished.new(file.mount, file.path, File.basename(file.path), file.bytes, file.started_at, file.duration.total_seconds.to_i64))
+        notify_extensions("record a finished recording", &.recording_finished(file))
       end
     end
     point.add_tap(recording, burst: true) if recording
@@ -284,7 +262,7 @@ class IcecastServer
             when "aac" then point.adts? ? HLS::Codec::AAC : nil
             end
     return unless codec
-    return if @config.auth_url # HLS requests cannot be checked by listener authentication
+    return unless @extensions.all?(&.hls_allowed?(point.mount))
     tap = @hls_mutex.synchronize do
       next if @hls_taps.has_key?(point.mount)
       segmenter = HLS::Segmenter.new(codec, @config.hls_segment_seconds.to_f, @config.hls_window)
@@ -334,7 +312,7 @@ class IcecastServer
   private def handle_hls_playlist(client : IO, mount : String, address : String, headers : HTTP::Headers, head : Bool)
     client_ip = client_address(headers, address)
     return send_banned(client, head) if listener_ban(client_ip, headers, mount)
-    if realm = listener_challenge(mount, headers, client_ip)
+    if realm = listener_challenge(Lurcast::ListenerRequest.new(nil, mount, client_ip, headers))
       return request_authentication(client, realm)
     end
     segmenter = hls_segmenter(mount)
@@ -361,7 +339,7 @@ class IcecastServer
     end
     client_ip = client_address(headers, address)
     return send_banned(client, head) if listener_ban(client_ip, headers, mount)
-    if realm = listener_challenge(mount, headers, client_ip)
+    if realm = listener_challenge(Lurcast::ListenerRequest.new(nil, mount, client_ip, headers))
       return request_authentication(client, realm)
     end
     record_hls_client(mount, address)

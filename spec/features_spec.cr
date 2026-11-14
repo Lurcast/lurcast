@@ -1,4 +1,6 @@
 require "./spec_helper"
+
+private alias WebhooksPlugin = Lurcast::Plugins::Webhooks
 require "http/server"
 
 private FEATURE_SOURCE_AUTH = "Basic c291cmNlOnNlY3JldA==" # source:secret
@@ -54,16 +56,16 @@ end
 
 describe "Access log" do
   it "formats combined log lines and masks passwords" do
-    entry = AccessLog::Entry.new(address: "203.0.113.7", user: "admin", started_at: Time.utc(2026, 11, 13, 22, 1, 14),
+    entry = Lurcast::RequestRecord.new(address: "203.0.113.7", user: "admin", started_at: Time.utc(2026, 11, 13, 22, 1, 14),
       method: "GET", target: "/admin.cgi?mode=viewxml&pass=s3cret&sid=1", version: "HTTP/1.1", status: 200, bytes: 512_i64,
       referer: nil, user_agent: %(Player "1"), duration: 125.seconds)
-    AccessLog.format(entry).should eq(%(203.0.113.7 - admin [13/Nov/2026:22:01:14 +0000] "GET /admin.cgi?mode=viewxml&pass=*****&sid=1 HTTP/1.1" 200 512 "-" "Player \\"1\\"" 125))
+    Lurcast::Plugins::AccessLog.format(entry).should eq(%(203.0.113.7 - admin [13/Nov/2026:22:01:14 +0000] "GET /admin.cgi?mode=viewxml&pass=*****&sid=1 HTTP/1.1" 200 512 "-" "Player \\"1\\"" 125))
   end
 
   it "logs requests and finished listeners to the file" do
     dir = temp_dir("access")
     config = feature_config
-    config.access_log = File.join(dir, "access.log")
+    config.plugins = {"access_log" => YAML.parse({path: File.join(dir, "access.log")}.to_yaml)}
     server, port = start_feature_server(config)
     source = open_feature_source(port, "/live")
     send_frames(source, 3)
@@ -104,8 +106,12 @@ describe "Webhooks" do
     address = hook.bind_tcp("127.0.0.1", 0)
     spawn hook.listen
 
-    webhooks = Webhooks.new([WebhookConfig.new("http://127.0.0.1:#{address.port}/hook", secret: "shh")], "https://radio.example", "Lurcast/test", 2.seconds)
-    webhooks.emit(Webhooks::SongChanged.new("/live", "A - B", 3))
+    config = feature_config
+    config.public_url = "https://radio.example"
+    section = YAML.parse({endpoints: [{url: "http://127.0.0.1:#{address.port}/hook", secret: "shh"}], timeout: 2}.to_yaml)
+    webhooks = Lurcast::Plugins::Webhooks.build(section, config).should_not be_nil
+    webhooks.start(IcecastServer.new(config))
+    webhooks.song_changed("/live", "A - B", 3, Time.utc)
     event, signature, body = receive(received, 5.seconds)
 
     event.should eq("song.changed")
@@ -115,25 +121,26 @@ describe "Webhooks" do
     json["server"].as_s.should eq("https://radio.example")
     attempts.should eq(2)
   ensure
-    webhooks.try(&.close)
+    webhooks.try(&.stop)
     hook.try(&.close)
   end
 
   it "lists every event record in the configuration's event names" do
-    events = [Webhooks::SourceConnected::EVENT, Webhooks::SourceDisconnected::EVENT, Webhooks::SongChanged::EVENT,
-              Webhooks::ListenerConnected::EVENT, Webhooks::ListenerDisconnected::EVENT, Webhooks::RecordingFinished::EVENT,
-              Webhooks::ConfigReloaded::EVENT]
-    events.sort.should eq(WebhookConfig::EVENTS.sort)
+    events = [WebhooksPlugin::SourceConnected::EVENT, WebhooksPlugin::SourceDisconnected::EVENT, WebhooksPlugin::SongChanged::EVENT,
+              WebhooksPlugin::ListenerConnected::EVENT, WebhooksPlugin::ListenerDisconnected::EVENT, WebhooksPlugin::RecordingFinished::EVENT,
+              WebhooksPlugin::ConfigReloaded::EVENT]
+    events.sort.should eq(WebhooksPlugin::EVENTS.sort)
   end
 
   it "sends only subscribed events and rejects unknown names" do
-    WebhookConfig.new("https://a.example").wants?("listener.connected").should be_false
-    WebhookConfig.new("https://a.example").wants?("song.changed").should be_true
-    WebhookConfig.new("https://a.example", ["listener.connected"]).wants?("song.changed").should be_false
+    endpoint = WebhooksPlugin::Endpoint
+    endpoint.new("https://a.example").wants?("listener.connected").should be_false
+    endpoint.new("https://a.example").wants?("song.changed").should be_true
+    endpoint.new("https://a.example", ["listener.connected"]).wants?("song.changed").should be_false
 
     config = feature_config
-    config.webhooks = [WebhookConfig.new("https://a.example", ["song.played"])]
-    expect_raises(ArgumentError, /unknown webhook events: song.played/) { config.validate! }
+    config.plugins = {"webhooks" => YAML.parse("endpoints: [{url: https://a.example, events: [song.played]}]")}
+    expect_raises(ArgumentError, /Invalid plugins.webhooks: unknown events: song.played/) { config.validate! }
   end
 end
 

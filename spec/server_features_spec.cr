@@ -719,7 +719,7 @@ describe IcecastServer do
     config.host = "127.0.0.1"
     config.source_password = "local-password-is-not-used"
     config.admin_password = "admin"
-    config.auth_url = "http://127.0.0.1:#{auth_port}/auth"
+    config.plugins = {"url_auth" => YAML.parse("url: http://127.0.0.1:#{auth_port}/auth")}
     config.max_connections_per_ip = 10
     http_listener = TCPServer.new("127.0.0.1", 0)
     port = http_listener.local_address.as(Socket::IPAddress).port
@@ -792,8 +792,7 @@ describe IcecastServer do
     config.max_connections_per_ip = 10
     config.public_url = "http://radio.example:8000"
     config.admin_email = "admin@example.com"
-    config.yp_urls = ["http://127.0.0.1:#{yp_port}/yp"]
-    config.yp_touch_interval = 1
+    config.plugins = {"yp" => YAML.parse("{urls: [http://127.0.0.1:#{yp_port}/yp], touch_interval: 1}")}
     http_listener = TCPServer.new("127.0.0.1", 0)
     port = http_listener.local_address.as(Socket::IPAddress).port
     server = IcecastServer.new(config)

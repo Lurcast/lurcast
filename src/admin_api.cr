@@ -32,8 +32,6 @@ module AdminAPI
   # Which optional features are configured, so the dashboard shows only what applies.
   record Features,
     reload : Bool,
-    access_log : Bool,
-    webhooks : Int32,
     recordings : Bool,
     hls : Bool,
     locations : String?,

@@ -86,8 +86,6 @@ class IcecastServer
         default_passwords: full ? @config.default_password_settings : [] of String,
         features: AdminAPI::Features.new(
           reload: full && !@config_path.nil?,
-          access_log: !@access_log.nil?,
-          webhooks: @config.webhooks.size,
           recordings: !@config.recordings_dir.nil?,
           hls: @config.hls?,
           locations: locations_source,

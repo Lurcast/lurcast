@@ -70,10 +70,10 @@ module Lurcast::Plugins
       @mutex.synchronize { @files[mount]? || @files[ALL]? }
     end
 
-    def listener_challenge(mount : String, headers : HTTP::Headers, address : String) : String?
-      file = file_for(mount) || return
+    def listener_challenge(request : ListenerRequest) : String?
+      file = file_for(request.mount) || return
       realm = @mutex.synchronize { @settings.realm }
-      user, password = basic_credentials(headers) || return realm
+      user, password = basic_credentials(request.headers) || return realm
       verified?(file, user, password) ? nil : realm
     end
 

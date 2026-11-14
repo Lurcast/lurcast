@@ -66,27 +66,6 @@ class MountConfig
   end
 end
 
-class WebhookConfig
-  include YAML::Serializable
-  include YAML::Serializable::Strict
-
-  EVENTS         = %w[source.connected source.disconnected song.changed listener.connected listener.disconnected recording.finished config.reloaded]
-  DEFAULT_EVENTS = EVENTS.reject(&.starts_with?("listener."))
-
-  getter url : String
-  # Event names to send; without it, every event except the listener ones.
-  getter events : Array(String)?
-  # Signs each body with HMAC-SHA256 in `X-Lurcast-Signature` when set.
-  getter secret : String?
-
-  def initialize(@url : String, @events : Array(String)? = nil, @secret : String? = nil)
-  end
-
-  def wants?(event : String) : Bool
-    (@events || DEFAULT_EVENTS).includes?(event)
-  end
-end
-
 class Config
   include YAML::Serializable
   include YAML::Serializable::Strict
@@ -142,17 +121,7 @@ class Config
   property master_password : String?
   property master_update_interval : Int32 = 120
   property? relays_on_demand : Bool = false
-  property auth_url : String?
-  property auth_header : String = "icecast-auth-user"
-  property auth_timeout : Int32 = 5
-  property yp_urls : Array(String) = [] of String
-  property yp_timeout : Int32 = 15
-  property yp_touch_interval : Int32 = 60
   property song_history_size : Int32 = 10
-  # Request log in the combined format Icecast uses; "-" writes to standard output.
-  property access_log : String?
-  property webhooks : Array(WebhookConfig) = [] of WebhookConfig
-  property webhook_timeout : Int32 = 5
   # Where Lurcast keeps its own state: the ban list and the listener history. Unset keeps them in memory.
   property data_dir : String?
   property recordings_dir : String?
@@ -167,6 +136,18 @@ class Config
   property hosting : YAML::Any?
   # Settings for the plugins built into the server (`acme`, `listener_logins`, `transcode`, ...), by name.
   property plugins : Hash(String, YAML::Any) = {} of String => YAML::Any
+
+  # Settings from before these features were plugins. They still work: `migrate_legacy_settings!`
+  # moves them into their sections under `plugins:`.
+  property auth_url : String?
+  property auth_header : String = "icecast-auth-user"
+  property auth_timeout : Int32 = 5
+  property yp_urls : Array(String) = [] of String
+  property yp_timeout : Int32 = 15
+  property yp_touch_interval : Int32 = 60
+  property access_log : String?
+  property webhooks : Array(YAML::Any) = [] of YAML::Any
+  property webhook_timeout : Int32 = 5
 
   def initialize
   end
@@ -213,8 +194,8 @@ class Config
     raise ArgumentError.new("source_password must not be empty") if @source_password.empty?
     raise ArgumentError.new("admin_password must not be empty") if @admin_password.empty?
     limits = {@max_listeners, @max_sources, @max_connections_per_ip, @burst_size, @queue_size,
-              @metadata_interval, @timeout, @rate_limit, @rate_limit_window, @auth_timeout,
-              @yp_timeout, @yp_touch_interval, @master_update_interval, @fallback_file_bitrate}
+              @metadata_interval, @timeout, @rate_limit, @rate_limit_window, @master_update_interval,
+              @fallback_file_bitrate}
     raise ArgumentError.new("limits must be positive") unless limits.all?(&.positive?)
     raise ArgumentError.new("timeouts must be positive") unless [@header_timeout, @source_timeout].compact.all?(&.positive?)
     raise ArgumentError.new("max_listeners_per_ip must be positive") if @max_listeners_per_ip.try { |value| !value.positive? }
@@ -238,6 +219,7 @@ class Config
     @mounts.each { |mount, settings| validate_mount_settings!(mount, settings) }
     raise ArgumentError.new("song_history_size must not be negative") if @song_history_size.negative?
     validate_features!
+    migrate_legacy_settings!
     Lurcast::Plugins.validate!(self)
     if webroot = @webroot
       raise ArgumentError.new("webroot must be a directory") unless Dir.exists?(webroot)
@@ -254,14 +236,7 @@ class Config
       validate_http_url!(master_url, "master_url")
       raise ArgumentError.new("master credentials are required") if @master_username.empty? || @master_password.presence.nil?
     end
-    if auth_url = @auth_url
-      validate_http_url!(auth_url, "auth_url")
-    end
-    @yp_urls.each { |url| validate_http_url!(url, "YP URL") }
     validate_http_url!(public_url, "public_url")
-    unless @yp_urls.empty?
-      raise ArgumentError.new("admin_email is required for YP publishing") if @admin_email.empty?
-    end
   end
 
   def shoutcast_mount_for(sid : Int32) : String?
@@ -378,21 +353,43 @@ class Config
     end
   end
 
-  private def validate_features!
-    @webhooks.each do |webhook|
-      validate_http_url!(webhook.url, "webhook URL")
-      unknown = (webhook.events || [] of String) - WebhookConfig::EVENTS
-      raise ArgumentError.new("unknown webhook events: #{unknown.join(", ")}") unless unknown.empty?
-      raise ArgumentError.new("webhook secret must not be empty") if webhook.secret.try(&.empty?)
+  # Moves settings from before these features were plugins (`webhooks`, `access_log`, `auth_url`,
+  # `yp_urls` and their options) into their sections under `plugins:`. Safe to call again.
+  def migrate_legacy_settings! : Nil
+    unless @webhooks.empty?
+      migrate_legacy("webhooks", "webhooks", {"endpoints" => @webhooks, "timeout" => @webhook_timeout})
+      @webhooks = [] of YAML::Any
     end
-    raise ArgumentError.new("webhook_timeout must be positive") unless @webhook_timeout.positive?
+    if path = @access_log
+      raise ArgumentError.new("access_log must not be empty") if path.empty?
+      migrate_legacy("access_log", "access_log", {"path" => path})
+      @access_log = nil
+    end
+    if url = @auth_url
+      migrate_legacy("url_auth", "auth_url", {"url" => url, "header" => @auth_header, "timeout" => @auth_timeout})
+      @auth_url = nil
+    end
+    unless @yp_urls.empty?
+      migrate_legacy("yp", "yp_urls", {"urls" => @yp_urls, "timeout" => @yp_timeout, "touch_interval" => @yp_touch_interval})
+      @yp_urls = [] of String
+    end
+  end
+
+  private def migrate_legacy(key : String, name : String, section) : Nil
+    if @plugins.has_key?(key)
+      raise ArgumentError.new("#{name} has moved to plugins.#{key}; set it only there")
+    end
+    @plugins[key] = YAML.parse(section.to_yaml)
+    ::Log.warn { "#{name} has moved to plugins.#{key}; it still works, but please move it in the configuration" }
+  end
+
+  private def validate_features!
     if dir = @recordings_dir
       raise ArgumentError.new("recordings_dir must be a directory") if File.exists?(dir) && !Dir.exists?(dir)
     end
     raise ArgumentError.new("record_split_minutes must not be negative") if @record_split_minutes.negative?
     raise ArgumentError.new("hls_segment_seconds must be between 1 and 30") unless 1 <= @hls_segment_seconds <= 30
     raise ArgumentError.new("hls_window must be between 3 and 30") unless 3 <= @hls_window <= 30
-    raise ArgumentError.new("access_log must not be empty") if @access_log.try(&.empty?)
     @trusted_proxies.each do |entry|
       raise ArgumentError.new("invalid trusted_proxies entry #{entry}") unless TrustedProxies.valid?(entry)
     end

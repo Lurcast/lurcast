@@ -1,4 +1,6 @@
+require "http/client"
 require "log"
+require "uri"
 require "yaml"
 require "./extension"
 require "./plugin/settings"
@@ -50,6 +52,22 @@ module Lurcast
     # Called after a configuration reload with the plugin's checked settings, or nil when the
     # section was removed or turns the plugin off. Invalid settings are logged and never get here.
     def reload(settings) : Nil
+    end
+
+    # Whether *value* is an http or https URL with a host.
+    def self.http_url?(value : String) : Bool
+      uri = URI.parse(value)
+      uri.scheme.in?("http", "https") && !uri.host.presence.nil?
+    end
+
+    # Posts *params* as a form to *url* and returns the response (its body unread).
+    def self.post_form(url : String, params : Hash(String, String), timeout : Time::Span) : HTTP::Client::Response
+      uri = URI.parse(url)
+      HTTP::Client.new(uri) do |client|
+        client.connect_timeout = timeout
+        client.read_timeout = timeout
+        client.post(uri.request_target, form: params) { |response| response }
+      end
     end
 
     # Writes *content* to *path* through a temporary file, so readers never see half a file.
@@ -168,6 +186,7 @@ module Lurcast
 
     # Builds every plugin that *config* turns on.
     def self.build(config : Config) : Array(Plugin)
+      config.migrate_legacy_settings!
       plugins = [] of Plugin
       each_plugin do |plugin|
         if built = plugin.build(config.plugins[plugin.key]?, config)
@@ -180,7 +199,7 @@ module Lurcast
     def self.validate!(config : Config) : Nil
       unknown = config.plugins.keys - keys
       raise ArgumentError.new("unknown plugins: #{unknown.join(", ")}") unless unknown.empty?
-      build(config)
+      each_plugin { |plugin| plugin.settings_for(config.plugins[plugin.key]?, config) }
     end
   end
 end

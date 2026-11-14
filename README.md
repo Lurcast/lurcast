@@ -181,7 +181,9 @@ Send `SIGHUP` (`systemctl reload lurcast` with the bundled unit, or `kill -HUP <
 ### Access log
 
 ```yaml
-access_log: /var/log/lurcast/access.log   # or "-" for standard output
+plugins:
+  access_log:
+    path: /var/log/lurcast/access.log   # or "-" for standard output
 ```
 
 Each request is written in the combined log format with the duration in seconds at the end, which log analysers and Icecast tools read. Listeners are logged when they disconnect, with the bytes they received. Passwords in query strings (`pass=`, `password=`) are masked. A reload reopens the file, so `logrotate` can move it and then reload.
@@ -194,7 +196,7 @@ hls_segment_seconds: 6
 hls_window: 6
 ```
 
-MP3 and AAC (ADTS) mounts get an HLS playlist at `/<mount>.m3u8` (for example `/live.m3u8`) for browsers and phones that prefer HLS. Lurcast cuts the audio into segments on frame boundaries without transcoding, as HLS packed audio with ID3 timestamps; segments also carry the song title. Ogg and LATM streams are not offered over HLS. HLS listeners are counted as addresses that fetched a segment recently. HLS requests skip listener authentication and listener limits, so HLS stays off while `auth_url` is set.
+MP3 and AAC (ADTS) mounts get an HLS playlist at `/<mount>.m3u8` (for example `/live.m3u8`) for browsers and phones that prefer HLS. Lurcast cuts the audio into segments on frame boundaries without transcoding, as HLS packed audio with ID3 timestamps; segments also carry the song title. Ogg and LATM streams are not offered over HLS. HLS listeners are counted as addresses that fetched a segment recently. HLS requests skip listener authentication and listener limits, so HLS stays off while the `url_auth` plugin is on.
 
 ### Recording
 
@@ -211,11 +213,13 @@ Recordings are written to `<recordings_dir>/<mount>/<UTC start time>.<format>`, 
 ### Webhooks
 
 ```yaml
-webhooks:
-  - url: https://example.com/hooks/lurcast
-    secret: change-me           # optional: signs each request
-    events: [source.connected, source.disconnected, song.changed, recording.finished]
-webhook_timeout: 5
+plugins:
+  webhooks:
+    timeout: 5                      # seconds (default 5)
+    endpoints:
+      - url: https://example.com/hooks/lurcast
+        secret: change-me           # optional: signs each request
+        events: [source.connected, source.disconnected, song.changed, recording.finished]
 ```
 
 Events: `source.connected`, `source.disconnected`, `song.changed`, `listener.connected`, `listener.disconnected`, `recording.finished`, and `config.reloaded`. Without `events`, every event except the listener ones is sent. Each event is a JSON POST:
@@ -225,7 +229,7 @@ Events: `source.connected`, `source.disconnected`, `song.changed`, `listener.con
  "data": {"mount": "/live", "song": "Artist - Title", "listeners": 42}}
 ```
 
-With a `secret`, `X-Lurcast-Signature: sha256=<hex>` is the HMAC-SHA256 of the raw body; compare it before trusting the request. `X-Lurcast-Event` and `X-Lurcast-Delivery` (the id) are also sent. Failed deliveries (no answer, or a status other than 2xx) are retried after 2 and 10 seconds. Each webhook has its own queue, so a slow receiver never delays streaming.
+With a `secret`, `X-Lurcast-Signature: sha256=<hex>` is the HMAC-SHA256 of the raw body; compare it before trusting the request. `X-Lurcast-Event` and `X-Lurcast-Delivery` (the id) are also sent. Failed deliveries (no answer, or a status other than 2xx) are retried after 2 and 10 seconds. Each endpoint has its own queue, so a slow receiver never delays streaming.
 
 ### Listener history
 
@@ -265,6 +269,8 @@ Connection and rate limits still apply to the address that connects.
 ## Plugins
 
 Some features are plugins: they are built into the same binary but kept apart from the core server, in `src/plugins/`, and each one is turned on and set up in its own section under `plugins:` in `config.yml`. The dashboard shows the controls of the plugins that are on. Settings for a plugin that doesn't exist are an error, so typos are caught at startup.
+
+The plugins are `cover_art`, `listener_logins`, `acme` (automatic HTTPS) and `transcode`, described below, and `access_log`, `webhooks`, `url_auth` (external authentication) and `yp` (directory listings), described with those features elsewhere in this README.
 
 ### Cover art
 
@@ -431,23 +437,30 @@ relay_username: relay
 relay_password: change-me
 ```
 
-For external authentication, set `auth_url`. Lurcast sends form-encoded `stream_auth`, `listener_add`, `listener_remove`, `mount_add`, and `mount_remove` callbacks. Authorization callbacks are accepted only when the response is successful and contains the configured header with value `1`:
+For external authentication, turn on the `url_auth` plugin. Lurcast sends form-encoded `stream_auth`, `listener_add`, `listener_remove`, `mount_add`, and `mount_remove` callbacks. Authorization callbacks are accepted only when the response is successful and contains the configured header with value `1`:
 
 ```yaml
-auth_url: https://auth.example/icecast
-auth_header: icecast-auth-user
-auth_timeout: 5
+plugins:
+  url_auth:
+    url: https://auth.example/icecast
+    header: icecast-auth-user   # the default
+    timeout: 5                  # seconds (default 5)
 ```
 
-To publish source streams that send `Ice-Public: 1` or `icy-pub: 1`, configure one or more YP endpoints:
+To publish source streams that send `Ice-Public: 1` or `icy-pub: 1`, list one or more YP directories with the `yp` plugin:
 
 ```yaml
 hostname: radio.example
 public_url: https://radio.example
 admin_email: admin@example.com
-yp_urls:
-  - https://dir.xiph.org/cgi-bin/yp-cgi
+plugins:
+  yp:
+    urls:
+      - https://dir.xiph.org/cgi-bin/yp-cgi
+    touch_interval: 60          # seconds between updates (default 60)
 ```
+
+The settings these replaced (`access_log`, `webhooks`, `webhook_timeout`, `auth_url`, `auth_header`, `auth_timeout`, `yp_urls`, `yp_timeout`, `yp_touch_interval`) still work: Lurcast moves them into their plugin sections when it reads the configuration and logs a note to move them yourself.
 
 ## Send a stream
 

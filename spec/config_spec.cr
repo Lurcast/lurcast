@@ -47,8 +47,9 @@ describe Config do
     config.source_timeout_for.should eq(15)
     config.shoutcast_mount.should eq("/shoutcast")
     config.fallback_for("/live").should eq("/backup")
-    config.auth_url.should eq("https://auth.example/check")
-    config.yp_urls.should eq(["https://dir.example/yp"])
+    config.migrate_legacy_settings!
+    config.plugins["url_auth"]["url"].should eq("https://auth.example/check")
+    config.plugins["yp"]["urls"].as_a.should eq(["https://dir.example/yp"])
     config.relays.first.url.should eq("https://upstream.example/live.ogg")
     config.relays.first.mount.should eq("/relay.ogg")
     config.relays.first.retry_delay.should eq(2)
@@ -57,6 +58,33 @@ describe Config do
     config.master_update_interval.should eq(30)
     config.relays_on_demand?.should be_true
     config.log_level.should eq(Log::Severity::Info)
+  end
+
+  it "moves settings from before the plugins into their sections" do
+    config = Config.from_yaml <<-YAML
+      admin_email: ops@example.com
+      access_log: /tmp/lurcast-access.log
+      auth_url: https://auth.example/check
+      auth_timeout: 3
+      yp_urls: [https://dir.example/yp]
+      webhooks:
+        - url: https://hooks.example/radio
+          events: [song.changed]
+      webhook_timeout: 7
+      YAML
+    config.validate!
+
+    config.plugins["access_log"]["path"].should eq("/tmp/lurcast-access.log")
+    config.plugins["url_auth"]["timeout"].should eq(3)
+    config.plugins["yp"]["touch_interval"].should eq(60)
+    config.plugins["webhooks"]["timeout"].should eq(7)
+    config.plugins["webhooks"]["endpoints"][0]["events"].as_a.should eq(["song.changed"])
+    config.auth_url.should be_nil
+    config.validate! # moving them again changes nothing
+    Lurcast::Plugins.build(config).map(&.name).should contain("url_auth")
+
+    both = Config.from_yaml("access_log: /tmp/a.log\nplugins: {access_log: {path: /tmp/b.log}}")
+    expect_raises(ArgumentError, /access_log has moved to plugins.access_log/) { both.validate! }
   end
 
   it "rejects unknown configuration keys" do
@@ -76,9 +104,9 @@ describe Config do
     config = Config.new
     config.auth_url = "http:///auth"
 
-    expect_raises(ArgumentError, /include a host/) { config.validate! }
+    expect_raises(ArgumentError, /Invalid plugins.url_auth: url must be an http or https URL/) { config.validate! }
 
-    config.auth_url = nil
+    config.plugins.clear
     config.relays = [RelayConfig.new("https:///stream", "/relay")]
     expect_raises(ArgumentError, /include a host/) { config.validate! }
 
