@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+<%- if @robots -%>
+  <meta name="robots" content="noindex,nofollow">
+<%- end -%>
+  <title><%= h(@title) %></title>
+  <link rel="icon" href="<%= WebAssets.url("icon.svg") %>" type="image/svg+xml">
+  <link rel="stylesheet" href="<%= WebAssets.url("style.css") %>">
+  <script src="<%= WebAssets.url(@script) %>" defer></script>
+</head>
+<body>
+<%= @body %>
+</body>
+</html>

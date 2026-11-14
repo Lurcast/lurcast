@@ -1,0 +1,23 @@
+<main class="page">
+  <header class="page__head">
+    <div>
+      <h1 class="page__title">Song history</h1>
+      <p class="page__lead"><%= h(@title) %> · times in UTC</p>
+    </div>
+    <a class="btn" href="/">All streams</a>
+  </header>
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Played at (UTC)</th><th>Song title</th></tr></thead>
+      <tbody>
+<%- if @history.empty? -%>
+        <tr><td colspan="2" class="muted">No songs have played yet.</td></tr>
+<%- end -%>
+<%- @history.each do |song| -%>
+        <tr><td class="mono"><time datetime="<%= song.played_at.to_rfc3339 %>"><%= song.played_at.to_s("%H:%M:%S") %></time></td><td><%= h(song.title) %></td></tr>
+<%- end -%>
+      </tbody>
+    </table>
+  </div>
+  <%= FOOTER %>
+</main>

@@ -1,0 +1,11 @@
+.git
+bin
+lib
+logs
+spec
+bench
+*.dwarf
+*.log
+*.mp3
+/lurcast
+/config.yml

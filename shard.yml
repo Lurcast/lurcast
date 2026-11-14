@@ -1,0 +1,24 @@
+name: lurcast
+version: 0.1.0
+description: Internet radio streaming server, compatible with Icecast and SHOUTcast sources, players and tools.
+homepage: https://lurcast.com
+repository: https://github.com/lurcast/lurcast
+documentation: https://lurcast.com/docs
+
+authors:
+  - The Lurcast authors
+
+targets:
+  lurcast:
+    main: src/main.cr
+  ameba:
+    main: lib/ameba/bin/ameba.cr
+
+development_dependencies:
+  ameba:
+    github: crystal-ameba/ameba
+    version: ~> 1.7.0
+
+crystal: '>= 1.21.0'
+
+license: AGPL-3.0-only

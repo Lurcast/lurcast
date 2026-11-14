@@ -1,0 +1,10 @@
+Globs:
+  - src/**/*.cr
+  - spec/**/*.cr
+  - bench/**/*.cr
+
+Excluded:
+  - src/test.cr
+
+Metrics/CyclomaticComplexity:
+  MaxComplexity: 60

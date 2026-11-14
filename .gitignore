@@ -1,0 +1,14 @@
+.DS_Store
+/config.yml
+/lurcast
+/docs/
+/lib/
+/bin/
+/logs/
+/.shards/
+*.log
+*.dwarf
+/*.mp3
+/data/
+license.key
+*.key

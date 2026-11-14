@@ -1,0 +1,52 @@
+<main class="page">
+  <header class="page__head">
+    <div>
+      <h1 class="page__title">Live streams</h1>
+<%- if @streams.empty? -%>
+      <p class="page__lead">Nothing is on air right now.</p>
+<%- else -%>
+      <p class="page__lead"><%= live_count %> <%= live_count == 1 ? "station" : "stations" %> on air · <span data-total-listeners><%= listener_count %></span> listening now</p>
+<%- end -%>
+    </div>
+  </header>
+  <div class="stations" data-stations>
+<%- if @streams.empty? -%>
+    <div class="empty"><strong>No active streams.</strong>Check back soon; this page updates when you reload it.</div>
+<%- end -%>
+<%- @streams.each do |stream| -%>
+<%- details = stream.station_details -%>
+<%- name = details.name.presence || stream.mount -%>
+<%- song = stream.current_song -%>
+<%- history = stream.song_history -%>
+<%- description = [details.genre, details.description].reject(&.empty?).join(" · ") -%>
+    <article class="station" data-mount="<%= h(stream.mount) %>" data-name="<%= h(name) %>">
+      <button class="station__play" type="button" aria-label="Play <%= h(name) %>" hidden<%= " disabled" unless stream.has_source? %>><%= ICON_PLAY %><%= ICON_PAUSE %></button>
+      <div class="station__body">
+        <div class="station__top"><h2 class="station__name"><%= h(name) %></h2><span data-status><%= stream.has_source? ? %(<span class="pill pill--live"><span class="dot"></span>Live</span>) : %(<span class="pill">Offline</span>) %></span></div>
+<%- unless description.empty? -%>
+        <p class="station__desc"><%= h(description) %></p>
+<%- end -%>
+        <div class="now"<%= " hidden" if song.empty? %> data-now><span class="now__label">Now playing</span><span class="now__song" data-song><%= h(song) %></span></div>
+        <audio class="station__audio" controls preload="none" src="<%= h(stream.mount) %>"></audio>
+        <div class="station__meta">
+          <span data-listeners><%= stream.listener_count %> listening</span>
+          <span class="chip"><%= h(Templates.format_label(stream.content_type, stream.bitrate)) %></span>
+          <a href="<%= h(stream.mount) %>.m3u">Open in your player</a>
+<%- if web_url?(details.url) -%>
+          <a href="<%= h(details.url) %>" rel="noopener nofollow">Website</a>
+<%- end -%>
+        </div>
+        <details class="history"<%= " hidden" if history.empty? %> data-history>
+          <summary>Recently played</summary>
+          <ol>
+<%- history.each do |played| -%>
+            <li><time datetime="<%= played.played_at.to_rfc3339 %>"><%= played.played_at.to_s("%H:%M") %></time><span><%= h(played.title) %></span></li>
+<%- end -%>
+          </ol>
+        </details>
+      </div>
+    </article>
+<%- end -%>
+  </div>
+  <%= FOOTER %>
+</main>

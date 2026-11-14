@@ -1,0 +1,37 @@
+[Unit]
+Description=Lurcast streaming server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lurcast
+Group=lurcast
+ExecStart=/usr/local/bin/lurcast --config /etc/lurcast/config.yml
+# `systemctl reload lurcast` applies config.yml changes and reopens the access log.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+# Each listener holds one socket; raise this above max_listeners.
+LimitNOFILE=65536
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Uncomment to bind ports below 1024 without root.
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+# Add the webroot here if fallback or intro files live outside /etc/lurcast.
+ReadOnlyPaths=/etc/lurcast
+# /var/lib/lurcast, owned by the service user and writable (station data, license key, recordings).
+StateDirectory=lurcast
+# /var/log/lurcast, for access_log.
+LogsDirectory=lurcast
+
+[Install]
+WantedBy=multi-user.target
