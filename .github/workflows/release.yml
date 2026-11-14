@@ -20,14 +20,18 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    container: crystallang/crystal:1.21.1-alpine
     steps:
       - uses: actions/checkout@v5
-      - run: apk add --no-cache libogg-dev libogg-static
-      - run: shards install --production
+      # The static build runs in the Alpine image with `docker run`, not as a job container,
+      # because GitHub's JavaScript actions cannot run in Alpine containers on ARM64 runners.
       - name: Build static binary
         run: |
-          shards build lurcast --production --release --static --no-debug
+          docker run --rm -v "$PWD:/src" -w /src crystallang/crystal:1.21.1-alpine sh -euc '
+            apk add --no-cache libogg-dev libogg-static
+            shards install --production
+            shards build lurcast --production --release --static --no-debug
+            chown -R "$(stat -c %u:%g /src)" bin lib
+          '
           mkdir -p dist
           cp bin/lurcast dist/lurcast-linux-${{ matrix.arch }}
           ./dist/lurcast-linux-${{ matrix.arch }} --version
@@ -61,7 +65,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/lurcast/lurcast
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
