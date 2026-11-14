@@ -28,6 +28,8 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src crystallang/crystal:1.21.1-alpine sh -euc '
             apk add --no-cache libogg-dev libogg-static
+            # Alpine has no static libopus package; build it from the release tarball.
+            sh ext/build-static-opus.sh
             shards install --production
             shards build lurcast --production --release --static --no-debug
             chown -R "$(stat -c %u:%g /src)" bin lib
@@ -54,7 +56,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
-          files: dist/*
+          files: |
+            dist/*
+            THIRD_PARTY_NOTICES.txt
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
