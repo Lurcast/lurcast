@@ -100,6 +100,20 @@ module Lurcast
       end
     end
 
+    # The plugin's part of the admin dashboard: a script next to the plugin's source, compiled in. See
+    # the top of `src/web/admin.js` for what it can add.
+    macro dashboard(path, dir = __DIR__)
+      DASHBOARD_SCRIPT = {{ read_file("#{dir.id}/#{path.id}") }}
+
+      def self.dashboard_script : String?
+        DASHBOARD_SCRIPT
+      end
+    end
+
+    # The plugin's dashboard script, or nil when it adds nothing to the dashboard.
+    def self.dashboard_script : String?
+    end
+
     macro inherited
       getter config : Config
       getter settings : Settings
@@ -194,6 +208,13 @@ module Lurcast
         end
       end
       plugins
+    end
+
+    # The dashboard scripts of every plugin, served as `plugins.js` and run before `admin.js`.
+    def self.dashboard_script : String
+      String.build do |io|
+        each_plugin { |plugin| plugin.dashboard_script.try { |script| io << script << '\n' } }
+      end
     end
 
     def self.validate!(config : Config) : Nil

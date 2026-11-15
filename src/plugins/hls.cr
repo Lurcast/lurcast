@@ -15,6 +15,7 @@ module Lurcast::Plugins
   # ```
   class Hls < Plugin
     register "hls"
+    dashboard "hls/dashboard.js"
 
     SEGMENT_PATH = "#{WebAssets::PREFIX}/hls"
     PLAYLIST     = ".m3u8"
@@ -86,13 +87,17 @@ module Lurcast::Plugins
       remove(mount)
     end
 
-    def hls_url(mount : String) : String?
-      "#{mount}#{PLAYLIST}" if tap(mount)
+    # The dashboard shows the playlist and the HLS listeners as `hls_url` and `hls_listeners`.
+    def mount_fields(mount : String, view : MountView) : Hash(String, JSON::Any)?
+      return unless view.admin? && tap(mount)
+      {
+        "hls_url"       => JSON::Any.new("#{config.public_url.rstrip('/')}#{mount}#{PLAYLIST}"),
+        "hls_listeners" => JSON::Any.new(listener_count(mount).to_i64),
+      }
     end
 
     # Listeners using HLS, counted as addresses that fetched a segment in the last few segment lengths.
-    def hls_listeners(mount : String) : Int32?
-      return unless tap(mount)
+    def listener_count(mount : String) : Int32
       now = Time.instant
       @mutex.synchronize do
         clients = @clients[mount]?
@@ -144,7 +149,7 @@ module Lurcast::Plugins
               end
       wanted = settings && codec && point.has_source? && !point.source_protocol.file? &&
                settings.serves?(point.mount) &&
-               server.hls_allowed?(point.mount)
+               !server.each_listener_checked?(point.mount)
       current = tap(point.mount)
       return if current && wanted && current.point.same?(point) && current.settings.same?(settings)
       remove(point.mount) if current

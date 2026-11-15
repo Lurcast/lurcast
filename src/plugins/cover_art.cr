@@ -14,10 +14,12 @@ module Lurcast::Plugins
   # ```
   class CoverArt < Plugin
     register "cover_art", enabled_by_default: true
+    dashboard "cover_art/dashboard.js"
 
-    PATH      = "/_lurcast/art"
-    MAX_BYTES = 1024 * 1024
-    TYPES     = {"image/jpeg" => "jpg", "image/png" => "png", "image/gif" => "gif", "image/webp" => "webp", "image/bmp" => "bmp"}
+    PATH           = "/_lurcast/art"
+    MAX_BYTES      = 1024 * 1024
+    ULTRAVOX_TYPES = {"image/jpeg", "image/png", "image/bmp", "image/gif"}
+    TYPES          = {"image/jpeg" => "jpg", "image/png" => "png", "image/gif" => "gif", "image/webp" => "webp", "image/bmp" => "bmp"}
 
     record Image, content_type : String, data : Bytes, etag : String do
       def self.new(content_type : String, data : Bytes) : Image
@@ -33,12 +35,21 @@ module Lurcast::Plugins
       load_station_logos
     end
 
-    def artwork_received(mount : String, playing : Bool, content_type : String, data : Bytes) : Nil
-      store(mount, playing, data.empty? ? nil : Image.new(content_type, data))
+    # Ultravox artwork: types 0x40xx are the station logo and 0x41xx the playing song's cover; the low
+    # byte is the image format. An empty item removes the image.
+    def ultravox_metadata(mount : String, type : UInt16, data : Bytes) : Nil
+      return unless 0x4000 <= type <= 0x41ff
+      content_type = ULTRAVOX_TYPES[(type & 0xff).to_i]? || return
+      store(mount, type & 0x0100 != 0, data.empty? ? nil : Image.new(content_type, data))
     end
 
-    def artwork_url(mount : String) : String?
-      "#{PATH}#{mount}" if image(mount, nil)
+    # The image's path, as `artwork` in the status JSON and the dashboard and as an absolute
+    # `now_playing.artwork_url` in `/api/v1/stations`.
+    def mount_fields(mount : String, view : MountView) : Hash(String, JSON::Any)?
+      return if view.station? || image(mount, nil).nil?
+      path = "#{PATH}#{mount}"
+      return {"artwork_url" => JSON::Any.new("#{config.public_url.rstrip('/')}#{path}")} if view.now_playing?
+      {"artwork" => JSON::Any.new(path)}
     end
 
     # The image for *mount*: the playing song's cover when *playing* is true, the station logo when

@@ -397,7 +397,17 @@ module Lurcast::Plugins
 end
 ```
 
-Every section also takes `enabled: false`, and unknown settings are an error that names the plugin. `GET` routes answer `HEAD` too, `prefix: true` matches every path under the given one, `suffix: true` every path that ends with it, and `context.halt(404, "message")` ends a route with a JSON error. A plugin gets the server's hooks (`start`, `stop`, `song_changed`, `listener_challenge`, `artwork_received`, and others in `src/extension.cr`) by overriding them, and `reload(settings)` after a configuration reload, with nil when the section was removed. Each plugin logs as `lurcast.plugins.<name>` and keeps its files in `data_dir/<name>/`.
+Every section also takes `enabled: false`, and unknown settings are an error that names the plugin. `GET` routes answer `HEAD` too, `prefix: true` matches every path under the given one, `suffix: true` every path that ends with it, and `context.halt(404, "message")` ends a route with a JSON error. `reload(settings)` runs after a configuration reload, with nil when the section was removed. Each plugin logs as `lurcast.plugins.<name>` and keeps its files in `data_dir/<name>/`.
+
+The core server knows no plugin by name: plugins work only through the hooks in `src/extension.cr`, which they override. Among them:
+
+- `source_connected`, `source_disconnected`, `song_changed`, `listener_connected`, `listener_finished` and others, to follow what happens;
+- `listener_challenge` and `source_login`, to decide who may listen or send;
+- `mount_fields(mount, view)`, to add fields to a mount in the status JSON, `/api/v1/stations` (the station or its `now_playing`) and the dashboard's data;
+- `listener_count`, for listeners a plugin serves itself (they count in the listener history), and `checks_each_listener?`, which keeps such features off a mount whose listeners must each have a connection;
+- `ultravox_metadata`, for the binary metadata SHOUTcast 2 sources send, such as artwork.
+
+A plugin adds to the dashboard with a script next to its source, `dashboard "my_plugin/dashboard.js"`, which registers its parts: labels, figures and links for a mount, an image next to the song playing, and panels on the Settings tab. The top of `src/web/admin.js` lists them; `src/plugins/hls/dashboard.js` is a short example.
 
 ## Admin and statistics endpoints
 

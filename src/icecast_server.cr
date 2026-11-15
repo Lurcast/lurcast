@@ -230,7 +230,7 @@ class IcecastServer
     when "/status-json.xsl", "/status.json"
       send_json(client, status_json(public_streams), headers, head: head)
     when "/api/v1/stations"
-      body = RadioAPI.render(SERVER_ID, @config.public_url, @start_time, public_streams, artwork_urls)
+      body = RadioAPI.render(SERVER_ID, @config.public_url, @start_time, public_streams, ->mount_fields(String, Lurcast::MountView))
       send_json(client, body, headers, head: head)
     when "/admin"
       if headers["Accept"]?.try(&.includes?("text/html"))
@@ -348,7 +348,7 @@ class IcecastServer
       mountpoint.update_metadata(current_song)
     end
     notify_extensions("apply a station update on #{mount}", &.station_updated(mount, mountpoint))
-    response = RadioAPI.render_station(@config.public_url, mountpoint, artwork_url(mount))
+    response = RadioAPI.render_station(@config.public_url, mountpoint, ->mount_fields(String, Lurcast::MountView))
     send_json(client, response, headers)
   rescue ex : JSON::ParseException | ArgumentError
     send_api_error(client, 400, "Invalid JSON: #{ex.message}", request.headers)
@@ -811,14 +811,7 @@ class IcecastServer
   end
 
   private def status_json(listed : Array(MountPoint)) : String
-    IcecastAPI.render(SERVER_ID, @start_time, listed, artwork_urls)
-  end
-
-  private def artwork_urls : Hash(String, String)
-    return {} of String => String if @extensions.empty?
-    streams.each_with_object({} of String => String) do |stream, urls|
-      artwork_url(stream.mount).try { |url| urls[stream.mount] = url }
-    end
+    IcecastAPI.render(SERVER_ID, @start_time, listed, ->(mount : String) { mount_fields(mount, Lurcast::MountView::Status) })
   end
 
   # Streams shown on unauthenticated status pages; `hidden` mounts stay visible to admins.
@@ -1154,31 +1147,30 @@ class IcecastServer
     nil
   end
 
-  # Whether every extension lets *mount* be served over HLS.
-  def hls_allowed?(mount : String) : Bool
-    @extensions.all?(&.hls_allowed?(mount))
+  # Whether an extension must see every listener of *mount* as a connection of its own.
+  def each_listener_checked?(mount : String) : Bool
+    @extensions.any?(&.checks_each_listener?(mount))
   end
 
-  def hls_url(mount : String) : String?
-    @extensions.each do |extension|
-      if url = extension.hls_url(mount)
-        return url
-      end
-    end
-    nil
+  # Listeners of *mount* that extensions serve without a stream connection.
+  def extra_listeners(mount : String) : Int32
+    @extensions.sum(&.listener_count(mount))
   end
 
-  def hls_listeners(mount : String) : Int32?
+  # The fields extensions add to *mount* in *view*.
+  def mount_fields(mount : String, view : Lurcast::MountView) : Hash(String, JSON::Any)
+    fields = {} of String => JSON::Any
     @extensions.each do |extension|
-      if count = extension.hls_listeners(mount)
-        return count
-      end
+      extension.mount_fields(mount, view).try { |more| fields.merge!(more) }
+    rescue ex
+      Log.error(exception: ex) { "Extension failed to describe #{mount}" }
     end
-    nil
+    fields
   end
 
   # Checks a request to play *mount* that is not a stream connection (an HLS playlist or segment)
-  # against the ban list and the listener logins. Answers 403 or 401 and returns true when it may not.
+  # against the ban list and the extensions' `listener_challenge`. Answers 403 or 401 and returns true when
+  # it may not.
   def listener_refused?(client : IO, mount : String, headers : HTTP::Headers, address : String, *, head = false) : Bool
     client_ip = client_address(headers, address)
     if listener_ban(client_ip, headers, mount)
@@ -1195,15 +1187,6 @@ class IcecastServer
   # The CORS headers to answer a request with, or nil when its origin isn't allowed.
   def cors_headers_for(headers : HTTP::Headers) : HTTP::Headers?
     cors_headers(headers)
-  end
-
-  def artwork_url(mount : String) : String?
-    @extensions.each do |extension|
-      if url = extension.artwork_url(mount)
-        return url
-      end
-    end
-    nil
   end
 
   # Sends a binary body, such as an image.

@@ -183,13 +183,16 @@
 
   class AuthError extends Error {}
 
+  // `body` is sent as JSON, or as it is when it is a file (a Blob).
   const request = async (method, path, params, body) => {
     const query = params ? `?${new URLSearchParams(params)}` : "";
     const headers = { Authorization: state.auth, "X-Lurcast-Admin": "1" };
-    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const raw = body instanceof Blob;
+    if (raw) headers["Content-Type"] = body.type || "application/octet-stream";
+    else if (body !== undefined) headers["Content-Type"] = "application/json";
     const response = await fetch(`${path}${query}`, {
       method, headers, cache: "no-store", credentials: "omit",
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: raw || body === undefined ? body : JSON.stringify(body),
     });
     if (response.status === 401) throw new AuthError("Sign in again");
     const text = await response.text();
@@ -532,7 +535,7 @@
       m.online ? h("span", { class: "pill pill--live" }, h("span", { class: "dot" }), "Live") : h("span", { class: "pill" }, "Offline"),
       m.hidden ? h("span", { class: "pill" }, "Hidden") : null,
       m.recording ? h("span", { class: "pill pill--danger" }, h("span", { class: "dot" }), "Recording") : null,
-      m.hls_url ? h("span", { class: "chip" }, "HLS") : null,
+      fromPlugins("chips", m),
       m.online ? h("span", { class: "chip" }, m.format) : null,
       h("span", { class: "detail__actions" },
         m.online ? h("a", { class: "btn btn--sm", href: m.mount, target: "_blank", rel: "noopener" }, icon("play"), "Listen") : null)),
@@ -549,12 +552,69 @@
       case "listeners": return [listenersToolbar(m), listenersTable(m)];
       case "history": return [historySection(m)];
       case "bans": return [bansList(m), banForm(m)];
-      case "settings": return [recordingSection(m), stationForm(m), artworkSection(m), listenerLoginsSection(m), fallbackForm(m), dangerZone(m)];
+      case "settings": return [recordingSection(m), stationForm(m), ...fromPlugins("settings", m).flat(), fallbackForm(m), dangerZone(m)];
       default: return [nowPlaying(m), statsSection(m), historyPanel(m.mount), mountLocations(m), connectSection(m)];
     }
   };
 
   const section = (name, ...children) => h("div", { "data-section": name }, children);
+
+  // ---------- Plugins ----------
+
+  // Plugins add to the dashboard from their own scripts, which run before this one and queue a
+  // function that gets the dashboard API:
+  //
+  //   (window.lurcastPlugins = window.lurcastPlugins || []).push((dashboard) => {
+  //     dashboard.register("my_plugin", { stats: (m) => dashboard.stat("Thing", m.my_thing) });
+  //   });
+  //
+  // A plugin's parts are used only while it is on (listed in `features.plugins`). Each gets the
+  // mount `m`, which carries the plugin's own fields from `mount_fields`:
+  //
+  // - chips(m): small labels next to the mount's title
+  // - stats(m): `stat` cards on the Overview tab
+  // - links(m): [label, URL] pairs for the listen links
+  // - art(m): an image URL to show next to the song playing
+  // - settings(m): `section`s for the Settings tab
+  const pluginParts = [];
+
+  const fromPlugins = (part, m) => {
+    const on = state.data.server.features.plugins || [];
+    const results = [];
+    for (const { name, parts } of pluginParts) {
+      if (!on.includes(name) || typeof parts[part] !== "function") continue;
+      try {
+        const result = parts[part](m);
+        if (result !== null && result !== undefined) results.push(result);
+      } catch (error) {
+        console.error(`The ${name} plugin failed to draw ${part}`, error);
+      }
+    }
+    return results;
+  };
+
+  // Draws the section *name* of the open mount again with *build*, unless someone is using it.
+  const updateSection = (name, build) => {
+    const old = ui.body && ui.body.querySelector(`[data-section="${name}"]`);
+    const m = currentMount();
+    if (old && m && !preserved(old)) old.replaceWith(build(m));
+  };
+
+  const loadPlugins = () => {
+    const dashboard = {
+      register: (name, parts) => { pluginParts.push({ name, parts }); },
+      h, icon, section, stat, field, request, action, toast, confirmAction, markDirty, updateSection,
+      // Signs out and returns true when *error* means the admin login is no longer valid.
+      sessionEnded: (error) => {
+        if (!(error instanceof AuthError)) return false;
+        signOut("Your session ended. Sign in again.");
+        return true;
+      },
+    };
+    for (const install of window.lurcastPlugins || []) {
+      try { install(dashboard); } catch (error) { console.error("A dashboard plugin failed to load", error); }
+    }
+  };
 
   const nowPlaying = (m) => {
     if (!m.online) {
@@ -578,8 +638,9 @@
         });
       },
     }, input, h("button", { class: "btn", type: "submit" }, "Update title"));
-    const wrapper = section("now", h("div", { class: m.artwork ? "nowplaying nowplaying--art" : "nowplaying" },
-      m.artwork ? h("img", { class: "nowplaying__art", src: m.artwork, alt: "", width: "96", height: "96" }) : null,
+    const art = fromPlugins("art", m)[0];
+    const wrapper = section("now", h("div", { class: art ? "nowplaying nowplaying--art" : "nowplaying" },
+      art ? h("img", { class: "nowplaying__art", src: art, alt: "", width: "96", height: "96" }) : null,
       h("span", { class: "now__label" }, "Now playing"),
       h("p", { class: m.song ? "nowplaying__song" : "nowplaying__song is-empty" }, m.song || "The source has not sent a song title"),
       m.song_updated_at ? h("p", { class: "nowplaying__since" }, `Changed ${ago(m.song_updated_at)}`) : null,
@@ -602,7 +663,7 @@
       stat("Data sent", bytes(m.bytes_sent)),
       stat("Format", m.format),
       audio ? stat("Audio", audio) : null,
-      m.hls_url ? stat("HLS listeners", String(m.hls_listeners)) : null,
+      fromPlugins("stats", m),
       stat("Directory", m.listed ? "Listed" : "Not listed")));
   };
 
@@ -625,7 +686,7 @@
     if (m.relay_url) encoder.push(["Relays from", m.relay_url]);
     const links = [["Stream", `${base}${m.mount}`], ["Playlist", `${base}${m.mount}.m3u`]];
     if (m.shoutcast_sid) links.push(["SHOUTcast", `${base}/stream/${m.shoutcast_sid}`]);
-    if (m.hls_url) links.push(["HLS", m.hls_url]);
+    for (const more of fromPlugins("links", m)) links.push(...more);
     if (m.fallback) links.push(["Fallback", m.fallback]);
     return section("connect", h("div", { class: "two-col" },
       h("div", null, h("h3", { class: "section-title" }, "Encoder settings"), kv(encoder)),
@@ -839,118 +900,6 @@
         }
       },
     }, "Disconnect source")));
-
-// ---------- Plugins: cover art and listener logins ----------
-
-const plugin = (name) => (state.data.server.features.plugins || []).includes(name);
-
-const uploadArtwork = async (m, type, file) => {
-  try {
-    const response = await fetch(`/admin/artwork?${new URLSearchParams({ mount: m.mount, type })}`, {
-      method: "POST", body: file, cache: "no-store", credentials: "omit",
-      headers: { Authorization: state.auth, "X-Lurcast-Admin": "1", "Content-Type": file.type || "application/octet-stream" },
-    });
-    if (response.status === 401) throw new AuthError("Sign in again");
-    if (!response.ok) {
-      const text = await response.text();
-      let message = text;
-      try { message = JSON.parse(text).error || text; } catch (_) { /* keep text */ }
-      throw new Error(message || `Upload failed (${response.status})`);
-    }
-    toast(type === "station" ? "Station logo saved" : "Cover saved");
-    await refresh();
-  } catch (error) {
-    if (error instanceof AuthError) return signOut("Your session ended. Sign in again.");
-    toast(error.message, true);
-  }
-};
-
-const artworkSection = (m) => {
-  if (!plugin("cover_art")) return section("artwork");
-  const picker = (type, text) => {
-    const input = h("input", { type: "file", accept: "image/jpeg,image/png,image/gif,image/webp", class: "sr-only" });
-    input.addEventListener("change", () => { if (input.files[0]) uploadArtwork(m, type, input.files[0]); input.value = ""; });
-    return h("label", { class: "btn btn--sm" }, input, icon("upload"), text);
-  };
-  const remove = (type, text) => h("button", {
-    class: "btn btn--sm", type: "button",
-    onclick: () => action(() => request("POST", "/admin/artwork/remove", { mount: m.mount, type }), `${text} removed`),
-  }, `Remove ${text.toLowerCase()}`);
-  return section("artwork", h("div", { class: "panel panel--flat" },
-    h("div", { class: "panel__head" }, h("h3", { class: "panel__title" }, "Cover art")),
-    h("div", { class: "panel__body stack" },
-      h("div", { class: "toolbar" },
-        m.artwork ? h("img", { class: "artwork-preview", src: m.artwork, alt: "Current cover art", width: "64", height: "64" }) : null,
-        h("p", { class: "muted small" }, m.artwork
-          ? "Players get this image from the status JSON. The song cover is shown when there is one, otherwise the station logo."
-          : "SHOUTcast 2 encoders send cover art with the stream. For other encoders, upload a station logo here, or have your automation upload the cover of each song.")),
-      h("div", { class: "row-actions" },
-        picker("station", "Upload station logo"), m.artwork ? remove("station", "Logo") : null,
-        picker("playing", "Upload song cover"), m.artwork ? remove("playing", "Cover") : null))));
-};
-
-const listenerLogins = new Map();
-const listenerLoginsAt = new Map();
-
-const loadListenerLogins = async (mount) => {
-  try {
-    const { text } = await request("GET", "/admin/api/listener-logins", { mount });
-    listenerLogins.set(mount, JSON.parse(text));
-  } catch (error) {
-    if (error instanceof AuthError) return signOut("Your session ended. Sign in again.");
-    listenerLogins.set(mount, null);
-  }
-  const old = ui.body && ui.body.querySelector('[data-section="listener-logins"]');
-  if (old && !preserved(old) && currentMount() && currentMount().mount === mount) old.replaceWith(listenerLoginsSection(currentMount()));
-};
-
-const listenerLoginsSection = (m) => {
-  if (!plugin("listener_logins")) return section("listener-logins");
-  const now = Date.now();
-  if (now - (listenerLoginsAt.get(m.mount) || 0) > 15000) {
-    listenerLoginsAt.set(m.mount, now);
-    loadListenerLogins(m.mount);
-  }
-  const head = h("div", { class: "panel__head" }, h("h3", { class: "panel__title" }, "Listener logins"));
-  const list = listenerLogins.get(m.mount);
-  if (list === undefined) return section("listener-logins", h("div", { class: "panel panel--flat" }, head, h("div", { class: "panel__body" }, h("p", { class: "muted small" }, "Loading…"))));
-  if (list === null) {
-    return section("listener-logins", h("div", { class: "panel panel--flat" }, head, h("div", { class: "panel__body" },
-      h("p", { class: "muted small" }, "Anyone can listen to this mount. To require a login, list it under plugins.listener_logins.mounts in config.yml."))));
-  }
-  const user = h("input", { class: "input", name: "user", autocomplete: "off", required: "", maxlength: "255" });
-  const password = h("input", { class: "input", name: "password", type: "password", autocomplete: "new-password", required: "", minlength: "4" });
-  const reload = () => { listenerLoginsAt.set(m.mount, 0); loadListenerLogins(m.mount); };
-  const wrapper = section("listener-logins", h("div", { class: "panel panel--flat" }, head,
-    h("div", { class: "panel__body stack" },
-      h("p", { class: "muted small" }, `Listeners sign in with one of these logins, for example with ${m.listen_url.replace("://", "://user:password@")}. They are kept in ${list.file}.`),
-      list.users.length
-        ? h("div", { class: "table-wrap" }, h("table", { class: "table" },
-          h("thead", null, h("tr", null, h("th", null, "User"), h("th", null, h("span", { class: "sr-only" }, "Remove")))),
-          h("tbody", null, list.users.map((name) => h("tr", null,
-            h("td", { class: "mono" }, name),
-            h("td", null, h("div", { class: "row-actions" }, h("button", {
-              class: "btn btn--sm", type: "button",
-              onclick: async () => {
-                if (await confirmAction(`Remove ${name}?`, "They can no longer listen to this mount. Players that are already connected keep playing until they reconnect.", "Remove login")) {
-                  await action(() => request("POST", "/admin/listener-logins/remove", { mount: m.mount, user: name }), "Login removed", reload);
-                }
-              },
-            }, "Remove"))))))))
-        : h("p", { class: "muted small" }, "No logins yet, so nobody can listen."),
-      h("form", {
-        class: "form-grid",
-        onsubmit: async (event) => {
-          event.preventDefault();
-          const ok = await action(() => request("POST", "/admin/listener-logins", { mount: m.mount, user: user.value.trim(), password: password.value }), "Login saved", () => { wrapper.dataset.dirty = ""; document.activeElement.blur(); });
-          if (ok) reload();
-        },
-      },
-      field("User", user), field("Password", password, "Saving an existing user changes their password."),
-      h("div", { class: "form-actions span-2" }, h("button", { class: "btn btn--primary", type: "submit" }, "Save login"))))));
-  markDirty(wrapper);
-  return wrapper;
-};
 
   // ---------- Listener history chart ----------
 
@@ -1401,6 +1350,7 @@ const listenerLoginsSection = (m) => {
   });
 
   const boot = async () => {
+    loadPlugins();
     state.auth = loadAuth();
     if (!state.auth) return showLogin();
     readHash();

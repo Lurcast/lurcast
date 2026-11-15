@@ -20,6 +20,7 @@ module Lurcast::Plugins
   # `POST /admin/listener-logins` and `POST /admin/listener-logins/remove`.
   class ListenerLogins < Plugin
     register "listener_logins"
+    dashboard "listener_logins/dashboard.js"
 
     ALL      = "*"
     REMEMBER = 10.minutes

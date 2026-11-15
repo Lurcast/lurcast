@@ -16,7 +16,7 @@ class IcecastServer
     cipher_requested = false
     headers = HTTP::Headers.new
     metadata_fragments = {} of UInt16 => Array(Bytes?)
-    artwork_fragments = {} of UInt16 => Array(Bytes?)
+    binary_fragments = {} of UInt16 => Array(Bytes?)
     mount = nil.as(String?)
     mountpoint = nil.as(MountPoint?)
     sync_read = true
@@ -106,8 +106,8 @@ class IcecastServer
         Ultravox.write(client, message.type, "ACK\0")
       when 0x1005
         break
-      when 0x3902, 0x4000..0x41ff
-        handle_uvox_cacheable(mountpoint, message, metadata_fragments, artwork_fragments)
+      when 0x3902, 0x4000..0x4fff
+        handle_uvox_cacheable(mountpoint, message, metadata_fragments, binary_fragments)
       else
         unless Ultravox.data_type?(message.type)
           Log.debug { "Ignoring Ultravox message 0x#{message.type.to_s(16)}" }
@@ -134,13 +134,13 @@ class IcecastServer
     Ultravox.write(client, type, "NAK:#{reason}\0")
   end
 
-  # Song titles (XML, 0x3902) and artwork (0x40xx and 0x41xx); ignored before the source goes live.
-  private def handle_uvox_cacheable(mountpoint : MountPoint?, message : Ultravox::Message, metadata : Hash(UInt16, Array(Bytes?)), artwork : Hash(UInt16, Array(Bytes?)))
+  # Song titles (XML, 0x3902), and other items for the extensions; ignored before the source goes live.
+  private def handle_uvox_cacheable(mountpoint : MountPoint?, message : Ultravox::Message, metadata : Hash(UInt16, Array(Bytes?)), others : Hash(UInt16, Array(Bytes?)))
     return unless mountpoint
     if message.type == 0x3902
       handle_uvox_metadata(mountpoint, message.payload, metadata)
     else
-      handle_uvox_artwork(mountpoint, message.type, message.payload, artwork)
+      handle_uvox_other(mountpoint, message.type, message.payload, others)
     end
   end
 
@@ -163,18 +163,10 @@ class IcecastServer
     whole.to_slice
   end
 
-  ARTWORK_TYPES = {"image/jpeg", "image/png", "image/bmp", "image/gif"}
-
-  # Station logos are types 0x40xx and the playing song's cover 0x41xx; the low byte is the format.
-  private def handle_uvox_artwork(mountpoint : MountPoint, type : UInt16, payload : Bytes, fragments : Hash(UInt16, Array(Bytes?)))
-    content_type = ARTWORK_TYPES[(type & 0xff).to_i]? || return
-    playing = type & 0x0100 != 0
+  # Passes a metadata item the server doesn't use itself to the extensions, once it is whole.
+  private def handle_uvox_other(mountpoint : MountPoint, type : UInt16, payload : Bytes, fragments : Hash(UInt16, Array(Bytes?)))
     data = uvox_fragment(payload, fragments) || return
-    @extensions.each do |extension|
-      extension.artwork_received(mountpoint.mount, playing, content_type, data)
-    rescue ex
-      Log.error(exception: ex) { "Extension failed to store artwork for #{mountpoint.mount}" }
-    end
+    notify_extensions("handle Ultravox metadata for #{mountpoint.mount}", &.ultravox_metadata(mountpoint.mount, type, data))
   end
 
   private def handle_uvox_metadata(mountpoint : MountPoint, payload : Bytes, fragments : Hash(UInt16, Array(Bytes?)))

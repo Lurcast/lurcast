@@ -1,5 +1,6 @@
 require "http/headers"
 require "http/request"
+require "json"
 
 module Lurcast
   # A finished listener connection, reported to extensions when the listener disconnects.
@@ -15,7 +16,7 @@ module Lurcast
     country : String? = nil
 
   # A listener asking to play a mount, before it is let in. *id* is the id the listener will have,
-  # or nil for an HLS request, which is not a listener connection of its own.
+  # or nil for a request that is not a listener connection of its own, such as an HLS segment.
   record ListenerRequest,
     id : Int64?,
     mount : String,
@@ -34,6 +35,15 @@ module Lurcast
     address : String,
     user_agent : String,
     country : String?
+
+  # Where `Extension#mount_fields` adds fields: the Icecast status JSON (`/status-json.xsl`), a station
+  # in `/api/v1/stations`, the `now_playing` object of that station, and a mount in the dashboard.
+  enum MountView
+    Status
+    Station
+    NowPlaying
+    Admin
+  end
 
   # One finished HTTP request, for request logs. Listener requests finish when the listener leaves.
   record RequestRecord,
@@ -76,7 +86,7 @@ module Lurcast
     end
 
     # Returns the ISO 3166-1 country code for a listener's address, or nil. The first extension that
-    # answers is used; the country is shown in the dashboard and passed to webhooks and sessions.
+    # answers is used; the country is shown in the dashboard and passed to the other hooks.
     def listener_country(address : String) : String?
     end
 
@@ -128,18 +138,21 @@ module Lurcast
     def station_updated(mount : String, point : MountPoint) : Nil
     end
 
-    # Return false to keep HLS off for *mount*, for example when its listeners must be checked one by one.
-    def hls_allowed?(mount : String) : Bool
-      true
+    # Return true when this extension must see every listener of *mount* as a connection of its own
+    # (`listener_challenge` with an id, then `listener_closed`). Features that serve listeners without
+    # one, such as HLS, then stay off for the mount.
+    def checks_each_listener?(mount : String) : Bool
+      false
     end
 
-    # The path of the HLS playlist of *mount*, shown in the dashboard; nil when there is none.
-    def hls_url(mount : String) : String?
+    # Listeners of *mount* this extension serves without a stream connection, such as HLS players.
+    # They count in the listener history.
+    def listener_count(mount : String) : Int32
+      0
     end
 
-    # How many listeners play *mount* over HLS, or nil when this extension serves no HLS for it. They
-    # count in the listener history.
-    def hls_listeners(mount : String) : Int32?
+    # Fields to add to *mount* in *view*, or nil for none. Use names the server doesn't use itself.
+    def mount_fields(mount : String, view : MountView) : Hash(String, JSON::Any)?
     end
 
     def recording_finished(file : Recording::Finished) : Nil
@@ -157,13 +170,9 @@ module Lurcast
     def request_finished(request : RequestRecord) : Nil
     end
 
-    # Called when a SHOUTcast 2 source sends artwork for *mount*: the station logo, or the cover of
-    # the song playing when *playing* is true. An empty *data* removes it.
-    def artwork_received(mount : String, playing : Bool, content_type : String, data : Bytes) : Nil
-    end
-
-    # The path of the cover art for *mount*, listed in status output; nil when there is none.
-    def artwork_url(mount : String) : String?
+    # Called with each Ultravox (SHOUTcast 2) binary metadata item a source sends (types 0x4000 to
+    # 0x4fff), once all its fragments have arrived: for example artwork (0x4000 to 0x41ff).
+    def ultravox_metadata(mount : String, type : UInt16, data : Bytes) : Nil
     end
   end
 end

@@ -1,5 +1,6 @@
 require "json"
 require "./mount_point"
+require "./extension"
 
 module RadioAPI
   MAX_UPDATE_BYTES = 65_536
@@ -52,6 +53,7 @@ module RadioAPI
     uptime_seconds : Int64,
     bytes_sent : UInt64 do
     include JSON::Serializable
+    include JSON::Serializable::Unmapped
   end
 
   record StationInfo,
@@ -63,8 +65,9 @@ module RadioAPI
     include JSON::Serializable
   end
 
-  record NowPlaying, song : String?, updated_at : Time?, artwork_url : String? = nil do
+  record NowPlaying, song : String?, updated_at : Time? do
     include JSON::Serializable
+    include JSON::Serializable::Unmapped
   end
 
   record StreamInfo,
@@ -81,10 +84,12 @@ module RadioAPI
     include JSON::Serializable
   end
 
-  # *artwork* maps mounts to the path of their cover art.
-  def self.render(server_id : String, public_url : String, started_at : Time, streams : Array(MountPoint), artwork = {} of String => String) : String
+  # Fields gives the extra fields for a mount in a view (see `Lurcast::Extension#mount_fields`).
+  alias Fields = Proc(String, Lurcast::MountView, Hash(String, JSON::Any))
+
+  def self.render(server_id : String, public_url : String, started_at : Time, streams : Array(MountPoint), fields : Fields? = nil) : String
     base_url = public_url.rstrip('/')
-    stations = streams.map { |stream| station(base_url, stream, artwork[stream.mount]?) }.sort_by!(&.mount)
+    stations = streams.map { |stream| station(base_url, stream, fields) }.sort_by!(&.mount)
     server = ServerInfo.new(
       server_id,
       started_at,
@@ -95,22 +100,23 @@ module RadioAPI
     Response.new("1", server, stations).to_json
   end
 
-  def self.render_station(public_url : String, stream : MountPoint, artwork : String? = nil) : String
-    station(public_url.rstrip('/'), stream, artwork).to_json
+  def self.render_station(public_url : String, stream : MountPoint, fields : Fields? = nil) : String
+    station(public_url.rstrip('/'), stream, fields).to_json
   end
 
-  private def self.station(base_url : String, stream : MountPoint, artwork : String?) : Station
+  private def self.station(base_url : String, stream : MountPoint, fields : Fields?) : Station
     details = stream.station_details
     metadata = stream.metadata
     mp3 = stream.mp3_info
     current_listeners, peak_listeners, total_connections = stream.listener_stats
-    Station.new(
+    now_playing = NowPlaying.new(metadata.song.empty? ? nil : metadata.song, metadata.updated_at)
+    station = Station.new(
       stream.mount,
       "#{base_url}#{stream.mount}",
       stream.has_source?,
       stream.source_protocol,
       StationInfo.new(details.name, details.description, details.genre, details.url, details.listed),
-      NowPlaying.new(metadata.song.empty? ? nil : metadata.song, metadata.updated_at, artwork.try { |path| "#{base_url}#{path}" }),
+      now_playing,
       StreamInfo.new(
         stream.content_type,
         mp3.try(&.bitrate_kbps) || stream.bitrate,
@@ -124,5 +130,10 @@ module RadioAPI
       stream.uptime_seconds,
       stream.bytes_sent
     )
+    if extra = fields
+      station.json_unmapped.merge!(extra.call(stream.mount, Lurcast::MountView::Station))
+      now_playing.json_unmapped.merge!(extra.call(stream.mount, Lurcast::MountView::NowPlaying))
+    end
+    station
   end
 end

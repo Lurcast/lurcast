@@ -26,7 +26,7 @@ module Templates
   struct Layout
     include Helpers
 
-    def initialize(@title : String, @body : String, @script : String, @robots = false)
+    def initialize(@title : String, @body : String, @scripts : Array(String), @robots = false)
     end
 
     ECR.def_to_s "#{__DIR__}/web/views/layout.ecr"
@@ -75,15 +75,15 @@ module Templates
 
   # The public status page, served at `/`, `/status.xsl`, and `/status.html`.
   def self.index(streams : Array(MountPoint)) : String
-    Layout.new("Live streams", StatusPage.new(streams).to_s, "status.js").to_s
+    Layout.new("Live streams", StatusPage.new(streams).to_s, ["status.js"]).to_s
   end
 
   def self.played(history : Array(MountPoint::PlayedSong), title : String) : String
-    Layout.new("#{title} - Song history", PlayedPage.new(history, title).to_s, "status.js").to_s
+    Layout.new("#{title} - Song history", PlayedPage.new(history, title).to_s, ["status.js"]).to_s
   end
 
   def self.admin : String
-    Layout.new("Lurcast admin", AdminPage.new.to_s, "admin.js", robots: true).to_s
+    Layout.new("Lurcast admin", AdminPage.new.to_s, ["plugins.js", "admin.js"], robots: true).to_s
   end
 
   def self.format_label(content_type : String, bitrate : Int32) : String

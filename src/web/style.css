@@ -289,8 +289,8 @@ textarea.input { min-height: 72px; resize: vertical; }
 .nowplaying--art { grid-template-columns: 96px minmax(0, 1fr); column-gap: 18px; }
 .nowplaying--art > * { grid-column: 2; }
 .nowplaying--art > .nowplaying__art { grid-column: 1; grid-row: 1 / span 4; align-self: start; }
-.nowplaying__art, .artwork-preview { width: 96px; height: 96px; object-fit: cover; border-radius: var(--radius-sm); background: var(--line); }
-.artwork-preview { width: 64px; height: 64px; flex: none; }
+.nowplaying__art, .thumb { width: 96px; height: 96px; object-fit: cover; border-radius: var(--radius-sm); background: var(--line); }
+.thumb { width: 64px; height: 64px; flex: none; }
 @media (max-width: 560px) {
   .nowplaying--art { grid-template-columns: 64px minmax(0, 1fr); }
   .nowplaying__art { width: 64px; height: 64px; }

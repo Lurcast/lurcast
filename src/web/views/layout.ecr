@@ -10,7 +10,9 @@
   <title><%= h(@title) %></title>
   <link rel="icon" href="<%= WebAssets.url("icon.svg") %>" type="image/svg+xml">
   <link rel="stylesheet" href="<%= WebAssets.url("style.css") %>">
-  <script src="<%= WebAssets.url(@script) %>" defer></script>
+<%- @scripts.each do |script| -%>
+  <script src="<%= WebAssets.url(script) %>" defer></script>
+<%- end -%>
 </head>
 <body>
 <%= @body %>

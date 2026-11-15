@@ -1,5 +1,6 @@
 require "json"
 require "./mount_point"
+require "./extension"
 
 module IcecastAPI
   record Response, icestats : Stats do
@@ -29,19 +30,21 @@ module IcecastAPI
     title : String,
     stream_start_iso8601 : Time,
     uptime_seconds : Int64,
-    total_bytes_sent : UInt64,
-    artwork : String? = nil do
+    total_bytes_sent : UInt64 do
     include JSON::Serializable
+    include JSON::Serializable::Unmapped
   end
 
-  # *artwork* maps mounts to the path of their cover art, which Lurcast adds as `artwork`.
-  def self.render(server_id : String, started_at : Time, streams : Array(MountPoint), artwork = {} of String => String) : String
-    sources = streams.map { |stream| source(stream, artwork[stream.mount]?) }
+  # *fields* gives the extra fields for a mount (see `Lurcast::Extension#mount_fields`).
+  def self.render(server_id : String, started_at : Time, streams : Array(MountPoint), fields : Proc(String, Hash(String, JSON::Any))? = nil) : String
+    sources = streams.map do |stream|
+      source(stream).tap { |found| fields.try { |extra| found.json_unmapped.merge!(extra.call(stream.mount)) } }
+    end
     stats = Stats.new(server_id, started_at, sources.sum(&.listeners), sources.size, sources)
     Response.new(stats).to_json
   end
 
-  private def self.source(stream : MountPoint, artwork : String?) : Source
+  private def self.source(stream : MountPoint) : Source
     details = stream.station_details
     listeners, peak, total = stream.listener_stats
     Source.new(
@@ -58,8 +61,7 @@ module IcecastAPI
       stream.current_song,
       stream.start_time,
       stream.uptime_seconds,
-      stream.bytes_sent,
-      artwork
+      stream.bytes_sent
     )
   end
 end

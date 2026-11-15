@@ -81,8 +81,9 @@ module Lurcast::Plugins
       spawn notify(params("mount_remove", mount))
     end
 
-    def hls_allowed?(mount : String) : Bool
-      false
+    # HLS players can't be checked one connection at a time, so this keeps HLS off.
+    def checks_each_listener?(mount : String) : Bool
+      true
     end
 
     private def params(action : String, mount : String, address = "", user = "", password = "") : Hash(String, String)

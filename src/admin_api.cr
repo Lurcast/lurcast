@@ -1,6 +1,7 @@
 require "json"
 require "./mount_point"
 require "./source_protocol"
+require "./extension"
 
 # The admin dashboard's data, served as one `GET /admin/api/overview` response. Fields that do not
 # apply (for example the live ones of an offline mount) are nil and left out of the JSON. The
@@ -62,8 +63,6 @@ module AdminAPI
     online : Bool,
     record : Bool,
     recording : Recording? = nil,
-    hls_url : String? = nil,
-    hls_listeners : Int32? = nil,
     name : String? = nil,
     description : String? = nil,
     genre : String? = nil,
@@ -87,9 +86,9 @@ module AdminAPI
     song_updated_at : Time? = nil,
     history : Array(MountPoint::PlayedSong)? = nil,
     countries : Hash(String, Int32)? = nil,
-    clients : Array(MountPoint::ListenerInfo)? = nil,
-    artwork : String? = nil do
+    clients : Array(MountPoint::ListenerInfo)? = nil do
     include JSON::Serializable
+    include JSON::Serializable::Unmapped
 
     # This mount with the live state of *stream* filled in.
     # *countries* adds listener counts per country code ("" when unknown); *clients* adds the list.

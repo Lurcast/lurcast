@@ -10,7 +10,9 @@ module WebAssets
     "style.css" => {"text/css; charset=utf-8", {{ read_file("#{__DIR__}/web/style.css") }}},
     "status.js" => {"text/javascript; charset=utf-8", {{ read_file("#{__DIR__}/web/status.js") }}},
     "admin.js"  => {"text/javascript; charset=utf-8", {{ read_file("#{__DIR__}/web/admin.js") }}},
-    "icon.svg"  => {"image/svg+xml", {{ read_file("#{__DIR__}/web/icon.svg") }}},
+    # Each plugin's part of the dashboard.
+    "plugins.js" => {"text/javascript; charset=utf-8", Lurcast::Plugins.dashboard_script},
+    "icon.svg"   => {"image/svg+xml", {{ read_file("#{__DIR__}/web/icon.svg") }}},
   }
 
   VERSION = Digest::SHA256.hexdigest(FILES.values.join(&.[1]))[0, 12]

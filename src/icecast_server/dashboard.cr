@@ -106,7 +106,6 @@ class IcecastServer
     recording = recording_for(name).try do |active|
       AdminAPI::Recording.new(active.started_at, active.current_path.try { |path| File.basename(path) }, active.manual?)
     end
-    hls = hls_url(name)
     mount = AdminAPI::Mount.new(
       mount: name,
       listen_url: "#{base_url}#{name}",
@@ -119,13 +118,13 @@ class IcecastServer
       online: stream.try(&.has_source?) || false,
       record: @config.record?(name),
       recording: recording,
-      hls_url: hls.try { |path| "#{base_url}#{path}" },
-      hls_listeners: hls ? hls_listeners(name) : nil,
-      artwork: artwork_url(name),
     )
-    return mount unless stream
-    format = Templates.format_label(stream.content_type, stream.mp3_info.try(&.bitrate_kbps) || stream.bitrate)
-    mount.with_live(stream, format, countries: !locations_source.nil?, clients: clients)
+    if stream
+      format = Templates.format_label(stream.content_type, stream.mp3_info.try(&.bitrate_kbps) || stream.bitrate)
+      mount = mount.with_live(stream, format, countries: !locations_source.nil?, clients: clients)
+    end
+    mount.json_unmapped.merge!(mount_fields(name, Lurcast::MountView::Admin))
+    mount
   end
 
   # Admin actions accept Basic credentials, which a browser attaches by itself after anyone types

@@ -99,6 +99,13 @@ describe Lurcast::Plugin do
     plugin.reloads.should eq(["bye", nil])
   end
 
+  it "serves the plugins' dashboard scripts before the dashboard's own" do
+    script = Lurcast::Plugins.dashboard_script
+    %w[hls cover_art listener_logins].each { |name| script.should contain("register(\"#{name}\",") }
+    page = Templates.admin
+    page.index!("/_lurcast/plugins.js").should be < page.index!("/_lurcast/admin.js")
+  end
+
   it "routes requests to the methods marked with @[Route]" do
     listener = TCPServer.new("127.0.0.1", 0)
     port = listener.local_address.as(Socket::IPAddress).port
