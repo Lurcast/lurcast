@@ -133,6 +133,15 @@ module Lurcast
       true
     end
 
+    # The path of the HLS playlist of *mount*, shown in the dashboard; nil when there is none.
+    def hls_url(mount : String) : String?
+    end
+
+    # How many listeners play *mount* over HLS, or nil when this extension serves no HLS for it. They
+    # count in the listener history.
+    def hls_listeners(mount : String) : Int32?
+    end
+
     def recording_finished(file : Recording::Finished) : Nil
     end
 

@@ -1,5 +1,5 @@
-require "./mp3"
-require "./aac"
+require "../../mp3"
+require "../../aac"
 
 # HLS packed-audio segmenter (RFC 8216 section 3.4). Cuts an already
 # synchronized MP3 or AAC (ADTS) frame stream into segments on frame

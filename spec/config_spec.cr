@@ -83,6 +83,14 @@ describe Config do
     config.validate! # moving them again changes nothing
     Lurcast::Plugins.build(config).map(&.name).should contain("url_auth")
 
+    hls = Config.from_yaml("hls: true\nhls_window: 8\nmounts: {/talk: {hls: false}, /live: {hls: true}}")
+    hls.validate!
+    hls.plugins["hls"].should eq(YAML.parse("{segment_seconds: 6, window: 8, except: [/talk]}"))
+    hls.mount_settings("/talk").try(&.hls).should be_nil
+    only = Config.from_yaml("mounts: {/live: {hls: true}}")
+    only.validate!
+    only.plugins["hls"]["mounts"].as_a.should eq(["/live"])
+
     both = Config.from_yaml("access_log: /tmp/a.log\nplugins: {access_log: {path: /tmp/b.log}}")
     expect_raises(ArgumentError, /access_log has moved to plugins.access_log/) { both.validate! }
   end

@@ -1,5 +1,5 @@
 require "spec"
-require "../src/hls"
+require "../src/plugins/hls/segmenter"
 
 private PREFIX = "/_lurcast/hls/live/"
 

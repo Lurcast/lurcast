@@ -151,7 +151,7 @@ class IcecastServer
   end
 
   private def record_history_sample(now = Time.utc) : Nil
-    counts = streams.to_h { |stream| {stream.mount, stream.listener_count + hls_listener_count(stream.mount)} }
+    counts = streams.to_h { |stream| {stream.mount, stream.listener_count + (hls_listeners(stream.mount) || 0)} }
     @history.record(counts, now)
   end
 

@@ -28,6 +28,10 @@ class IcecastServer
     end
   end
 
+  private def send_binary(client : IO, body : Bytes, content_type : String, headers : HTTP::Headers, head : Bool)
+    write_response(client, 200, body, content_type, headers, head)
+  end
+
   private def send_page(client : IO, body : String, csp : String, head : Bool, *, frameable = true)
     headers = HTTP::Headers{
       "Content-Security-Policy" => csp,
@@ -87,7 +91,6 @@ class IcecastServer
         features: AdminAPI::Features.new(
           reload: full && !@config_path.nil?,
           recordings: !@config.recordings_dir.nil?,
-          hls: @config.hls?,
           locations: locations_source,
           bans_saved: @bans.persistent?,
           history_saved: !@config.data_dir.nil?,
@@ -103,7 +106,7 @@ class IcecastServer
     recording = recording_for(name).try do |active|
       AdminAPI::Recording.new(active.started_at, active.current_path.try { |path| File.basename(path) }, active.manual?)
     end
-    hls = hls_segmenter(name)
+    hls = hls_url(name)
     mount = AdminAPI::Mount.new(
       mount: name,
       listen_url: "#{base_url}#{name}",
@@ -116,8 +119,8 @@ class IcecastServer
       online: stream.try(&.has_source?) || false,
       record: @config.record?(name),
       recording: recording,
-      hls_url: hls ? "#{base_url}#{name}.m3u8" : nil,
-      hls_listeners: hls ? hls_listener_count(name) : nil,
+      hls_url: hls.try { |path| "#{base_url}#{path}" },
+      hls_listeners: hls ? hls_listeners(name) : nil,
       artwork: artwork_url(name),
     )
     return mount unless stream

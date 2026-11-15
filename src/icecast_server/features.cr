@@ -1,4 +1,3 @@
-require "../hls"
 require "../recording"
 
 class IcecastServer
@@ -7,18 +6,6 @@ class IcecastServer
 
   record ReloadResult, ok : Bool, error : String? = nil, restart_required : Array(String) = [] of String do
     include JSON::Serializable
-  end
-
-  # Feeds a mount's audio to its HLS segmenter, with the song playing at that moment.
-  private class HLSTap < AudioTap
-    getter segmenter : HLS::Segmenter
-
-    def initialize(@segmenter : HLS::Segmenter, @mount : MountPoint)
-    end
-
-    def receive(data : Bytes) : Nil
-      @segmenter.write(data, @mount.current_song)
-    end
   end
 
   record RecordingFile, name : String, bytes : Int64, modified_at : Time, recording : Bool do
@@ -41,10 +28,6 @@ class IcecastServer
   @access_mutex = Mutex.new
   @recordings = {} of String => Recording
   @recordings_mutex = Mutex.new
-  @hls_taps = {} of String => HLSTap
-  @hls_clients = {} of String => Hash(String, Time::Instant)
-  @hls_mutex = Mutex.new
-  @hls_pruned_at = Time.instant
   @tls_context : OpenSSL::SSL::Context::Server?
   @trusted_proxies = TrustedProxies.new([] of String)
   @reload_mutex = Mutex.new
@@ -84,10 +67,23 @@ class IcecastServer
       rescue ex
         Log.error(exception: ex) { "Extension failed to apply the reloaded configuration" }
       end
+      start_new_plugins
       Log.info { "Configuration reloaded from #{path}" }
       Log.warn { "Restart to apply: #{restart.join(", ")}" } unless restart.empty?
       notify_extensions("apply the reloaded configuration", &.reload_finished(restart))
       ReloadResult.new(true, restart_required: restart)
+    end
+  end
+
+  # Starts the plugins a reload turned on that were off until now.
+  private def start_new_plugins
+    running = @extensions.compact_map { |extension| extension.as?(Lurcast::Plugin).try(&.name) }
+    Lurcast::Plugins.build(@config, except: running).each do |plugin|
+      plugin.start(self)
+      add_extension(plugin)
+      Log.info { "Started the #{plugin.name} plugin" }
+    rescue ex
+      Log.error(exception: ex) { "Could not start the #{plugin.name} plugin" }
     end
   end
 
@@ -97,7 +93,6 @@ class IcecastServer
     streams.each do |stream|
       next if !stream.has_source? || stream.source_protocol.file?
       start_recording(stream) if @config.record?(stream.mount)
-      @config.hls_for?(stream.mount) ? start_hls(stream) : stop_hls(stream.mount)
     end
   end
 
@@ -184,13 +179,11 @@ class IcecastServer
   private def source_connected(mount : String, point : MountPoint)
     return if point.source_protocol.file?
     start_recording(point) if @config.record?(mount)
-    start_hls(point) if @config.hls_for?(mount)
   end
 
   private def source_disconnected(mount : String, point : MountPoint)
     return if point.source_protocol.file?
     stop_recording(mount)
-    stop_hls(mount)
   end
 
   # ---------- Listener locations ----------
@@ -252,104 +245,6 @@ class IcecastServer
 
   private def recordings_directory(mount : String) : String?
     @config.recordings_dir.try { |dir| File.join(dir, Recording.slug(mount)) }
-  end
-
-  # ---------- HLS ----------
-
-  private def start_hls(point : MountPoint)
-    codec = case point.format
-            when "mp3" then HLS::Codec::MP3
-            when "aac" then point.adts? ? HLS::Codec::AAC : nil
-            end
-    return unless codec
-    return unless @extensions.all?(&.hls_allowed?(point.mount))
-    tap = @hls_mutex.synchronize do
-      next if @hls_taps.has_key?(point.mount)
-      segmenter = HLS::Segmenter.new(codec, @config.hls_segment_seconds.to_f, @config.hls_window)
-      @hls_taps[point.mount] = HLSTap.new(segmenter, point)
-    end
-    point.add_tap(tap) if tap
-  end
-
-  private def stop_hls(mount : String)
-    tap = @hls_mutex.synchronize do
-      @hls_clients.delete(mount)
-      @hls_taps.delete(mount)
-    end
-    get_mount(mount).try(&.remove_tap(tap)) if tap
-  end
-
-  private def hls_segmenter(mount : String) : HLS::Segmenter?
-    @hls_mutex.synchronize { @hls_taps[mount]?.try(&.segmenter) }
-  end
-
-  # Listeners using HLS, counted as addresses that fetched a segment in the last few segment lengths.
-  private def hls_listener_count(mount : String) : Int32
-    window = (@config.hls_segment_seconds * 3).seconds
-    now = Time.instant
-    @hls_mutex.synchronize do
-      clients = @hls_clients[mount]?
-      next 0 unless clients
-      clients.reject! { |_address, seen| now - seen > window }
-      clients.size
-    end
-  end
-
-  # Remembers that *address* fetched a segment. Old entries are dropped every so often, so the table
-  # stays small even when nobody opens the dashboard.
-  private def record_hls_client(mount : String, address : String)
-    now = Time.instant
-    window = (@config.hls_segment_seconds * 3).seconds
-    @hls_mutex.synchronize do
-      (@hls_clients[mount] ||= {} of String => Time::Instant)[address] = now
-      if now - @hls_pruned_at > window
-        @hls_pruned_at = now
-        @hls_clients.each_value(&.reject! { |_address, seen| now - seen > window })
-      end
-    end
-  end
-
-  private def handle_hls_playlist(client : IO, mount : String, address : String, headers : HTTP::Headers, head : Bool)
-    client_ip = client_address(headers, address)
-    return send_banned(client, head) if listener_ban(client_ip, headers, mount)
-    if realm = listener_challenge(Lurcast::ListenerRequest.new(nil, mount, client_ip, headers))
-      return request_authentication(client, realm)
-    end
-    segmenter = hls_segmenter(mount)
-    playlist = segmenter.try(&.playlist("#{WebAssets::PREFIX}/hls#{mount}/"))
-    unless playlist
-      send_response(client, 404, segmenter ? "Stream is starting; try again in a few seconds" : "HLS is not available for this mount", head: head)
-      return
-    end
-    response_headers = cors_headers(headers) || HTTP::Headers.new
-    response_headers["Cache-Control"] = "no-cache"
-    send_response(client, 200, playlist, "application/vnd.apple.mpegurl", response_headers, head: head)
-  end
-
-  private def handle_hls_segment(client : IO, rest : String, address : String, headers : HTTP::Headers, head : Bool)
-    slash = rest.rindex('/')
-    file = slash ? rest[slash + 1..] : ""
-    mount = slash ? rest[0, slash] : ""
-    sequence = file.split('.', 2).first.to_i64?
-    segmenter = hls_segmenter(mount) if valid_mount?(mount)
-    segment = segmenter.try { |hls| sequence.try { |seq| hls.segment(seq) } }
-    unless segmenter && segment
-      send_response(client, 404, "Segment not found", head: head)
-      return
-    end
-    client_ip = client_address(headers, address)
-    return send_banned(client, head) if listener_ban(client_ip, headers, mount)
-    if realm = listener_challenge(Lurcast::ListenerRequest.new(nil, mount, client_ip, headers))
-      return request_authentication(client, realm)
-    end
-    record_hls_client(mount, address)
-    response_headers = cors_headers(headers) || HTTP::Headers.new
-    response_headers["Cache-Control"] = "public, max-age=#{@config.hls_segment_seconds * @config.hls_window}"
-    send_binary(client, segment, segmenter.content_type, response_headers, head)
-  end
-
-  private def send_binary(client : IO, body : Bytes, content_type : String, headers : HTTP::Headers, head : Bool)
-    write_response(client, 200, body, content_type, headers, head)
   end
 
   # ---------- Admin endpoints ----------

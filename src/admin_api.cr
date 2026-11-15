@@ -33,7 +33,6 @@ module AdminAPI
   record Features,
     reload : Bool,
     recordings : Bool,
-    hls : Bool,
     locations : String?,
     bans_saved : Bool,
     history_saved : Bool,

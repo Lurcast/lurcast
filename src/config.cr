@@ -44,7 +44,8 @@ class MountConfig
   property intro : String?
   # Record every source on this mount to `recordings_dir`.
   property? record : Bool = false
-  # Overrides the server-wide `hls` setting for this mount.
+  # From before HLS was a plugin: turns HLS on or off for this mount. `migrate_legacy_settings!` moves
+  # it into `plugins.hls` (`mounts` or `except`).
   property hls : Bool?
 
   def initialize(
@@ -127,9 +128,6 @@ class Config
   property recordings_dir : String?
   # Start a new recording file after this many minutes (MP3 and AAC only); 0 keeps one file per connection.
   property record_split_minutes : Int32 = 0
-  property? hls : Bool = false
-  property hls_segment_seconds : Int32 = 6
-  property hls_window : Int32 = 6
   # Reverse proxies (addresses or CIDR ranges) whose X-Forwarded-For header gives the client address.
   property trusted_proxies : Array(String) = [] of String
   # Settings for optional editions (for example `hosting:`); the core server ignores them.
@@ -148,6 +146,9 @@ class Config
   property access_log : String?
   property webhooks : Array(YAML::Any) = [] of YAML::Any
   property webhook_timeout : Int32 = 5
+  property? hls : Bool = false
+  property hls_segment_seconds : Int32 = 6
+  property hls_window : Int32 = 6
 
   def initialize
   end
@@ -354,7 +355,7 @@ class Config
   end
 
   # Moves settings from before these features were plugins (`webhooks`, `access_log`, `auth_url`,
-  # `yp_urls` and their options) into their sections under `plugins:`. Safe to call again.
+  # `yp_urls`, `hls` and their options) into their sections under `plugins:`. Safe to call again.
   def migrate_legacy_settings! : Nil
     unless @webhooks.empty?
       migrate_legacy("webhooks", "webhooks", {"endpoints" => @webhooks, "timeout" => @webhook_timeout})
@@ -373,6 +374,20 @@ class Config
       migrate_legacy("yp", "yp_urls", {"urls" => @yp_urls, "timeout" => @yp_timeout, "touch_interval" => @yp_touch_interval})
       @yp_urls = [] of String
     end
+    migrate_legacy_hls
+  end
+
+  # `hls: true` with per-mount `hls: false` becomes `except`; per-mount `hls: true` alone becomes `mounts`.
+  private def migrate_legacy_hls : Nil
+    overrides = mounts.compact_map { |mount, settings| settings.hls.try { |value| {mount, value} } }.to_h
+    only = overrides.select { |_mount, value| value }.keys.sort!
+    except = overrides.reject { |_mount, value| value }.keys.sort!
+    if @hls || !only.empty?
+      key, list = @hls ? {"except", except} : {"mounts", only}
+      migrate_legacy("hls", "hls", {"segment_seconds" => @hls_segment_seconds, "window" => @hls_window, key => list})
+    end
+    @hls = false
+    @mounts_mutex.synchronize { @mounts.each_value(&.hls = nil) } unless overrides.empty?
   end
 
   private def migrate_legacy(key : String, name : String, section) : Nil
@@ -388,8 +403,6 @@ class Config
       raise ArgumentError.new("recordings_dir must be a directory") if File.exists?(dir) && !Dir.exists?(dir)
     end
     raise ArgumentError.new("record_split_minutes must not be negative") if @record_split_minutes.negative?
-    raise ArgumentError.new("hls_segment_seconds must be between 1 and 30") unless 1 <= @hls_segment_seconds <= 30
-    raise ArgumentError.new("hls_window must be between 3 and 30") unless 3 <= @hls_window <= 30
     @trusted_proxies.each do |entry|
       raise ArgumentError.new("invalid trusted_proxies entry #{entry}") unless TrustedProxies.valid?(entry)
     end
@@ -423,11 +436,6 @@ class Config
 
   def record?(mount : String) : Bool
     mount_settings(mount).try(&.record?) || false
-  end
-
-  def hls_for?(mount : String) : Bool
-    value = mount_settings(mount).try(&.hls)
-    value.nil? ? @hls : value
   end
 
   # Settings that only take effect at startup.

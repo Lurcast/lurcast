@@ -198,8 +198,7 @@ end
 describe "HLS" do
   it "serves a playlist and segments for MP3 mounts" do
     config = feature_config
-    config.hls = true
-    config.hls_segment_seconds = 1
+    config.plugins = {"hls" => YAML.parse("segment_seconds: 1")}
     server, port = start_feature_server(config)
     source = open_feature_source(port, "/live")
     send_frames(source, 120) # about 3 seconds of 44.1 kHz MP3
@@ -218,6 +217,35 @@ describe "HLS" do
 
     feature_request(port, "GET /missing.m3u8")[0].should start_with("HTTP/1.0 404")
     feature_request(port, "GET /_lurcast/hls/live/1.mp3")[0].should start_with("HTTP/1.0 404")
+
+    admin = "Authorization: #{FEATURE_ADMIN_AUTH}\r\n"
+    mount = JSON.parse(String.new(feature_request(port, "GET /admin/api/overview", admin)[1]))["mounts"][0]
+    mount["hls_url"].as_s.should end_with("/live.m3u8")
+    mount["hls_listeners"].as_i.should eq(1)
+  ensure
+    source.try(&.close)
+    server.try(&.stop)
+  end
+
+  it "turns on and off with a configuration reload" do
+    dir = temp_dir("hls-reload")
+    path = File.join(dir, "config.yml")
+    base = "host: 127.0.0.1\nsource_password: secret\nadmin_password: admin\nmax_connections_per_ip: 50\n"
+    File.write(path, base)
+    server, port = start_feature_server(Config.load(path))
+    server.config_path = path
+    source = open_feature_source(port, "/live")
+    send_frames(source, 4)
+    feature_request(port, "GET /live.m3u8")[0].should start_with("HTTP/1.0 404")
+
+    File.write(path, base + "plugins:\n  hls: {segment_seconds: 1}\n")
+    server.reload_config.ok.should be_true
+    send_frames(source, 120)
+    wait_until(3.seconds) { feature_request(port, "GET /live.m3u8")[0].starts_with?("HTTP/1.0 200") }
+
+    File.write(path, base + "plugins:\n  hls: {segment_seconds: 1, except: [/live]}\n")
+    server.reload_config.ok.should be_true
+    feature_request(port, "GET /live.m3u8")[0].should start_with("HTTP/1.0 404")
   ensure
     source.try(&.close)
     server.try(&.stop)

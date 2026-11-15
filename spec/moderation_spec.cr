@@ -177,7 +177,9 @@ end
 
 describe "Bans on the server" do
   it "disconnects and refuses banned listeners, and lifts bans" do
-    server, port = start_mod_server(mod_config)
+    config = mod_config
+    config.plugins = {"hls" => YAML.parse("{}")}
+    server, port = start_mod_server(config)
     source = open_mod_source(port, "/live")
     listener, head = open_listener(port, "/live")
     head.should start_with("HTTP/1.0 200")

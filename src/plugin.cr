@@ -41,7 +41,8 @@ module Lurcast
     # Marks a method that answers requests: `@[Route("POST", "/admin/thing", admin: true)]`.
     #
     # - The method takes a `Context`. `GET` routes also answer `HEAD`.
-    # - `prefix: true` matches every path that starts with the given one.
+    # - `prefix: true` matches every path that starts with the given one, and `suffix: true` every
+    #   path that ends with it.
     # - `admin: true` asks for an admin login first and puts it in `Context#access`.
     annotation Route
     end
@@ -146,7 +147,7 @@ module Lurcast
         \{% for method in @type.methods %}
           \{% for route in method.annotations(::Lurcast::Plugin::Route) %}
             \{% raise "#{@type}##{method.name}: @[Route] needs a method and a path" unless route[0] && route[1] %}
-            if method == \{{ route[0] }} && \{% if route[:prefix] %} path.starts_with?(\{{ route[1] }}) \{% else %} path == \{{ route[1] }} \{% end %}
+            if method == \{{ route[0] }} && \{% if route[:prefix] %} path.starts_with?(\{{ route[1] }}) \{% elsif route[:suffix] %} path.ends_with?(\{{ route[1] }}) \{% else %} path == \{{ route[1] }} \{% end %}
               context = ::Lurcast::Plugin::Context.new(server, client, request, address)
               context.run(admin: \{{ route[:admin] == true }}) { \{{ method.name.id }}(context) }
               return true
@@ -184,12 +185,12 @@ module Lurcast
       keys
     end
 
-    # Builds every plugin that *config* turns on.
-    def self.build(config : Config) : Array(Plugin)
+    # Builds every plugin that *config* turns on, leaving out the ones named in *except*.
+    def self.build(config : Config, except : Enumerable(String) = [] of String) : Array(Plugin)
       config.migrate_legacy_settings!
       plugins = [] of Plugin
       each_plugin do |plugin|
-        if built = plugin.build(config.plugins[plugin.key]?, config)
+        if !except.includes?(plugin.key) && (built = plugin.build(config.plugins[plugin.key]?, config))
           plugins << built
         end
       end

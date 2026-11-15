@@ -191,12 +191,17 @@ Each request is written in the combined log format with the duration in seconds 
 ### HLS
 
 ```yaml
-hls: true                  # or per mount: mounts: { /live: { hls: true } }
-hls_segment_seconds: 6
-hls_window: 6
+plugins:
+  hls:
+    segment_seconds: 6
+    window: 6              # segments in the playlist
+    mounts: [/live]        # only these mounts; every MP3 and AAC mount when left out
+    except: [/talk]        # never these
 ```
 
-MP3 and AAC (ADTS) mounts get an HLS playlist at `/<mount>.m3u8` (for example `/live.m3u8`) for browsers and phones that prefer HLS. Lurcast cuts the audio into segments on frame boundaries without transcoding, as HLS packed audio with ID3 timestamps; segments also carry the song title. Ogg and LATM streams are not offered over HLS. HLS listeners are counted as addresses that fetched a segment recently. HLS requests skip listener authentication and listener limits, so HLS stays off while the `url_auth` plugin is on.
+MP3 and AAC (ADTS) mounts get an HLS playlist at `/<mount>.m3u8` (for example `/live.m3u8`) for browsers and phones that prefer HLS. Lurcast cuts the audio into segments on frame boundaries without transcoding, as HLS packed audio with ID3 timestamps; segments also carry the song title. Ogg and LATM streams are not offered over HLS. HLS listeners are counted as addresses that fetched a segment recently, and count in the listener history. Listener logins and the ban list apply to the playlist and every segment, but listener limits don't. The `url_auth` plugin checks listeners one connection at a time, so HLS stays off while it is on.
+
+HLS is the `hls` plugin. The older `hls: true`, `hls_segment_seconds`, `hls_window` and per-mount `hls:` settings still work and are moved into `plugins.hls` (per-mount `hls: false` becomes `except`).
 
 ### Recording
 
@@ -270,7 +275,7 @@ Connection and rate limits still apply to the address that connects.
 
 Some features are plugins: they are built into the same binary but kept apart from the core server, in `src/plugins/`, and each one is turned on and set up in its own section under `plugins:` in `config.yml`. The dashboard shows the controls of the plugins that are on. Settings for a plugin that doesn't exist are an error, so typos are caught at startup.
 
-The plugins are `cover_art`, `listener_logins`, `acme` (automatic HTTPS) and `transcode`, described below, and `access_log`, `webhooks`, `url_auth` (external authentication) and `yp` (directory listings), described with those features elsewhere in this README.
+The plugins are `cover_art`, `listener_logins`, `acme` (automatic HTTPS) and `transcode`, described below, and `hls`, `access_log`, `webhooks`, `url_auth` (external authentication) and `yp` (directory listings), described with those features elsewhere in this README. A configuration reload applies changed plugin settings and starts plugins that were turned on.
 
 ### Cover art
 
@@ -394,7 +399,7 @@ module Lurcast::Plugins
 end
 ```
 
-Every section also takes `enabled: false`, and unknown settings are an error that names the plugin. `GET` routes answer `HEAD` too, `prefix: true` matches every path under the given one, and `context.halt(404, "message")` ends a route with a JSON error. A plugin gets the server's hooks (`start`, `stop`, `song_changed`, `listener_challenge`, `artwork_received`, and others in `src/extension.cr`) by overriding them, and `reload(settings)` after a configuration reload, with nil when the section was removed. Each plugin logs as `lurcast.plugins.<name>` and keeps its files in `data_dir/<name>/`.
+Every section also takes `enabled: false`, and unknown settings are an error that names the plugin. `GET` routes answer `HEAD` too, `prefix: true` matches every path under the given one, `suffix: true` every path that ends with it, and `context.halt(404, "message")` ends a route with a JSON error. A plugin gets the server's hooks (`start`, `stop`, `song_changed`, `listener_challenge`, `artwork_received`, and others in `src/extension.cr`) by overriding them, and `reload(settings)` after a configuration reload, with nil when the section was removed. Each plugin logs as `lurcast.plugins.<name>` and keeps its files in `data_dir/<name>/`.
 
 ## Admin and statistics endpoints
 

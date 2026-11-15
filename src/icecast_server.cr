@@ -265,14 +265,10 @@ class IcecastServer
     when "/admin/fallbacks"
       handle_set_fallback(client, request.query_params, headers)
     else
-      if path.starts_with?("#{WebAssets::PREFIX}/hls/")
-        handle_hls_segment(client, path.lchop("#{WebAssets::PREFIX}/hls"), address, headers, head)
-      elsif path.starts_with?("#{WebAssets::PREFIX}/")
+      if path.starts_with?("#{WebAssets::PREFIX}/")
         handle_asset(client, path.lchop("#{WebAssets::PREFIX}/"), request.query_params, headers, head)
       elsif path.starts_with?("/admin/recordings/")
         handle_recording_download(client, path, headers, head)
-      elsif path.ends_with?(".m3u8") && (hls_mount = canonical_mount(path.rchop(".m3u8")))
-        handle_hls_playlist(client, hls_mount, address, headers, head)
       elsif path.ends_with?(".m3u")
         handle_playlist(client, path.rchop(".m3u"), headers, head)
       elsif mount = canonical_mount(path)
@@ -1156,6 +1152,49 @@ class IcecastServer
       end
     end
     nil
+  end
+
+  # Whether every extension lets *mount* be served over HLS.
+  def hls_allowed?(mount : String) : Bool
+    @extensions.all?(&.hls_allowed?(mount))
+  end
+
+  def hls_url(mount : String) : String?
+    @extensions.each do |extension|
+      if url = extension.hls_url(mount)
+        return url
+      end
+    end
+    nil
+  end
+
+  def hls_listeners(mount : String) : Int32?
+    @extensions.each do |extension|
+      if count = extension.hls_listeners(mount)
+        return count
+      end
+    end
+    nil
+  end
+
+  # Checks a request to play *mount* that is not a stream connection (an HLS playlist or segment)
+  # against the ban list and the listener logins. Answers 403 or 401 and returns true when it may not.
+  def listener_refused?(client : IO, mount : String, headers : HTTP::Headers, address : String, *, head = false) : Bool
+    client_ip = client_address(headers, address)
+    if listener_ban(client_ip, headers, mount)
+      send_banned(client, head)
+      return true
+    end
+    if realm = listener_challenge(Lurcast::ListenerRequest.new(nil, mount, client_ip, headers))
+      request_authentication(client, realm)
+      return true
+    end
+    false
+  end
+
+  # The CORS headers to answer a request with, or nil when its origin isn't allowed.
+  def cors_headers_for(headers : HTTP::Headers) : HTTP::Headers?
+    cors_headers(headers)
   end
 
   def artwork_url(mount : String) : String?
