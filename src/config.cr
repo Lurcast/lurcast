@@ -44,9 +44,6 @@ class MountConfig
   property intro : String?
   # Record every source on this mount to `recordings_dir`.
   property? record : Bool = false
-  # From before HLS was a plugin: turns HLS on or off for this mount. `migrate_legacy_settings!` moves
-  # it into `plugins.hls` (`mounts` or `except`).
-  property hls : Bool?
 
   def initialize(
     @burst_size : Int32? = nil,
@@ -62,7 +59,6 @@ class MountConfig
     @hidden : Bool = false,
     @intro : String? = nil,
     @record : Bool = false,
-    @hls : Bool? = nil,
   )
   end
 end
@@ -135,21 +131,6 @@ class Config
   # Settings for the plugins built into the server (`acme`, `listener_logins`, `transcode`, ...), by name.
   property plugins : Hash(String, YAML::Any) = {} of String => YAML::Any
 
-  # Settings from before these features were plugins. They still work: `migrate_legacy_settings!`
-  # moves them into their sections under `plugins:`.
-  property auth_url : String?
-  property auth_header : String = "icecast-auth-user"
-  property auth_timeout : Int32 = 5
-  property yp_urls : Array(String) = [] of String
-  property yp_timeout : Int32 = 15
-  property yp_touch_interval : Int32 = 60
-  property access_log : String?
-  property webhooks : Array(YAML::Any) = [] of YAML::Any
-  property webhook_timeout : Int32 = 5
-  property? hls : Bool = false
-  property hls_segment_seconds : Int32 = 6
-  property hls_window : Int32 = 6
-
   def initialize
   end
 
@@ -178,7 +159,7 @@ class Config
   def apply_env
     apply_string_env host, admin_password, source_password, tls_cert, tls_key, shoutcast_mount,
       uvox_cipher_key, hostname, public_url, admin_email, webroot, relay_username, relay_password,
-      master_url, master_username, master_password, auth_url, access_log, recordings_dir, data_dir
+      master_url, master_username, master_password, recordings_dir, data_dir
     apply_int_env port, max_listeners, max_sources, max_connections_per_ip, max_listeners_per_ip, queue_size,
       metadata_interval, timeout, header_timeout, source_timeout, rate_limit, rate_limit_window, tls_port, shoutcast_port,
       fallback_file_bitrate, master_update_interval
@@ -187,7 +168,6 @@ class Config
     @allowed_origins = env("ALLOWED_ORIGINS").try { |origins| origins.split(',').map!(&.strip) } || @allowed_origins
     @fallback_override = env_bool("FALLBACK_OVERRIDE", @fallback_override)
     @relays_on_demand = env_bool("RELAYS_ON_DEMAND", @relays_on_demand)
-    @hls = env_bool("HLS", @hls)
   end
 
   def validate!
@@ -220,7 +200,6 @@ class Config
     @mounts.each { |mount, settings| validate_mount_settings!(mount, settings) }
     raise ArgumentError.new("song_history_size must not be negative") if @song_history_size.negative?
     validate_features!
-    migrate_legacy_settings!
     Lurcast::Plugins.validate!(self)
     if webroot = @webroot
       raise ArgumentError.new("webroot must be a directory") unless Dir.exists?(webroot)
@@ -352,50 +331,6 @@ class Config
     if legacy = @legacy_buffer_size
       @burst_size = legacy
     end
-  end
-
-  # Moves settings from before these features were plugins (`webhooks`, `access_log`, `auth_url`,
-  # `yp_urls`, `hls` and their options) into their sections under `plugins:`. Safe to call again.
-  def migrate_legacy_settings! : Nil
-    unless @webhooks.empty?
-      migrate_legacy("webhooks", "webhooks", {"endpoints" => @webhooks, "timeout" => @webhook_timeout})
-      @webhooks = [] of YAML::Any
-    end
-    if path = @access_log
-      raise ArgumentError.new("access_log must not be empty") if path.empty?
-      migrate_legacy("access_log", "access_log", {"path" => path})
-      @access_log = nil
-    end
-    if url = @auth_url
-      migrate_legacy("url_auth", "auth_url", {"url" => url, "header" => @auth_header, "timeout" => @auth_timeout})
-      @auth_url = nil
-    end
-    unless @yp_urls.empty?
-      migrate_legacy("yp", "yp_urls", {"urls" => @yp_urls, "timeout" => @yp_timeout, "touch_interval" => @yp_touch_interval})
-      @yp_urls = [] of String
-    end
-    migrate_legacy_hls
-  end
-
-  # `hls: true` with per-mount `hls: false` becomes `except`; per-mount `hls: true` alone becomes `mounts`.
-  private def migrate_legacy_hls : Nil
-    overrides = mounts.compact_map { |mount, settings| settings.hls.try { |value| {mount, value} } }.to_h
-    only = overrides.select { |_mount, value| value }.keys.sort!
-    except = overrides.reject { |_mount, value| value }.keys.sort!
-    if @hls || !only.empty?
-      key, list = @hls ? {"except", except} : {"mounts", only}
-      migrate_legacy("hls", "hls", {"segment_seconds" => @hls_segment_seconds, "window" => @hls_window, key => list})
-    end
-    @hls = false
-    @mounts_mutex.synchronize { @mounts.each_value(&.hls = nil) } unless overrides.empty?
-  end
-
-  private def migrate_legacy(key : String, name : String, section) : Nil
-    if @plugins.has_key?(key)
-      raise ArgumentError.new("#{name} has moved to plugins.#{key}; set it only there")
-    end
-    @plugins[key] = YAML.parse(section.to_yaml)
-    ::Log.warn { "#{name} has moved to plugins.#{key}; it still works, but please move it in the configuration" }
   end
 
   private def validate_features!

@@ -73,7 +73,7 @@ shards build --release
 ./bin/lurcast --config config.yml
 ```
 
-Change `admin_password`, `source_password`, and `relay_password` before exposing the server; Lurcast logs a warning at startup for any still set to the built-in default. Common scalar settings can also be overridden with `LURCAST_...` environment variables, including `LURCAST_PORT`, `LURCAST_SOURCE_PASSWORD`, `LURCAST_TLS_PORT`, and `LURCAST_AUTH_URL`. The former `ICECAST_...` names remain aliases for deployment compatibility.
+Change `admin_password`, `source_password`, and `relay_password` before exposing the server; Lurcast logs a warning at startup for any still set to the built-in default. Common scalar settings can also be overridden with `LURCAST_...` environment variables, including `LURCAST_PORT`, `LURCAST_SOURCE_PASSWORD` and `LURCAST_TLS_PORT`. The former `ICECAST_...` names remain aliases for deployment compatibility.
 
 Lurcast uses Crystal 1.21's parallel execution context and scales up to the logical CPUs available to the process. Set `CRYSTAL_WORKERS` to a positive number to cap worker threads, or to `1` for single-threaded operation.
 
@@ -200,8 +200,6 @@ plugins:
 ```
 
 MP3 and AAC (ADTS) mounts get an HLS playlist at `/<mount>.m3u8` (for example `/live.m3u8`) for browsers and phones that prefer HLS. Lurcast cuts the audio into segments on frame boundaries without transcoding, as HLS packed audio with ID3 timestamps; segments also carry the song title. Ogg and LATM streams are not offered over HLS. HLS listeners are counted as addresses that fetched a segment recently, and count in the listener history. Listener logins and the ban list apply to the playlist and every segment, but listener limits don't. The `url_auth` plugin checks listeners one connection at a time, so HLS stays off while it is on.
-
-HLS is the `hls` plugin. The older `hls: true`, `hls_segment_seconds`, `hls_window` and per-mount `hls:` settings still work and are moved into `plugins.hls` (per-mount `hls: false` becomes `except`).
 
 ### Recording
 
@@ -464,8 +462,6 @@ plugins:
       - https://dir.xiph.org/cgi-bin/yp-cgi
     touch_interval: 60          # seconds between updates (default 60)
 ```
-
-The settings these replaced (`access_log`, `webhooks`, `webhook_timeout`, `auth_url`, `auth_header`, `auth_timeout`, `yp_urls`, `yp_timeout`, `yp_touch_interval`) still work: Lurcast moves them into their plugin sections when it reads the configuration and logs a note to move them yourself.
 
 ## Send a stream
 

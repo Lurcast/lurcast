@@ -30,7 +30,7 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 ReadOnlyPaths=/etc/lurcast
 # /var/lib/lurcast, owned by the service user and writable (station data, license key, recordings).
 StateDirectory=lurcast
-# /var/log/lurcast, for access_log.
+# /var/log/lurcast, for the access_log plugin.
 LogsDirectory=lurcast
 
 [Install]

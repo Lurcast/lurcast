@@ -187,7 +187,6 @@ module Lurcast
 
     # Builds every plugin that *config* turns on, leaving out the ones named in *except*.
     def self.build(config : Config, except : Enumerable(String) = [] of String) : Array(Plugin)
-      config.migrate_legacy_settings!
       plugins = [] of Plugin
       each_plugin do |plugin|
         if !except.includes?(plugin.key) && (built = plugin.build(config.plugins[plugin.key]?, config))
