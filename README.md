@@ -362,7 +362,7 @@ plugins:
 
 The target mount appears while the source mount has a source connected, and goes away about two seconds after it disconnects (its listeners move to its fallback, if one is set); a source that reconnects within that time keeps the same Opus stream going. Song titles on the source are copied to the target, and the station name, genre, description, and URL are copied when the target starts. Audio is resampled to 48 kHz and encoded in 20 ms Opus frames. Each stream costs a few percent of one CPU core.
 
-Each target must be unique, can't be its own source, and streams can't feed into each other in a loop. Changes to the list apply on a configuration reload (`kill -HUP`), restarting the streams that changed; adding the `transcode` section for the first time needs a restart.
+Each target must be unique, can't be its own source, and streams can't feed into each other in a loop. Changes to the list apply on a configuration reload (`kill -HUP`), restarting the streams that changed.
 
 Only permissively licensed codecs are built in, so there is no MP3 or AAC output and no AAC input. Building from source needs libopus (`brew install opus` or `apt install libopus-dev`) and a C compiler: the MP3 and Vorbis decoders and the resampler are in `ext/` and are compiled automatically.
 
