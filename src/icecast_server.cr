@@ -22,7 +22,7 @@ require "./ultravox"
 require "./web_assets"
 
 class IcecastServer
-  SERVER_ID       = "Lurcast/0.2.0"
+  SERVER_ID       = "Lurcast/0.3.0"
   ALLOWED_METHODS = "GET, HEAD, PUT, SOURCE, POST, PATCH, OPTIONS"
   MAX_INTRO_BYTES = 16 * 1024 * 1024
   MUTATING_PATHS  = {"/admin/metadata", "/admin.cgi", "/admin/killsource", "/admin/fallbacks", "/admin/killclient", "/admin/moveclients", "/admin/record", "/admin/reload"}

@@ -1,5 +1,5 @@
 name: lurcast
-version: 0.2.0
+version: 0.3.0
 description: Internet radio streaming server, compatible with Icecast and SHOUTcast sources, players and tools.
 homepage: https://lurcast.com
 repository: https://github.com/lurcast/lurcast
