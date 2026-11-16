@@ -22,16 +22,26 @@ private def mount_for(content_type : String, burst = 8192) : MountPoint
   mount
 end
 
-# Decodes *bytes* with ffmpeg and returns how many frames it decoded; fails on any decoding error.
-private def decoded_frames(bytes : Bytes, extension : String) : Int32
-  path = File.tempname("join", ".#{extension}")
-  File.write(path, bytes)
+# Decodes *path* with ffmpeg, returning its framemd5 lines and the errors it logged, without the
+# decoder addresses ("[opus @ 0x5d96...]") that differ between runs.
+private def ffmpeg_decode(path : String) : {String, Set(String)}
   output = IO::Memory.new
   errors = IO::Memory.new
   status = Process.run("ffmpeg", ["-v", "error", "-i", path, "-map", "0", "-f", "framemd5", "-"], output: output, error: errors)
   status.success?.should be_true
-  errors.to_s.should eq("")
-  output.to_s.lines.count { |line| !line.starts_with?('#') }
+  {output.to_s, errors.to_s.lines.map(&.gsub(/ @ 0x[0-9a-f]+/, "")).to_set}
+end
+
+# Decodes *bytes* with ffmpeg and returns how many frames it decoded. Fails on any decoding error
+# that decoding the whole *fixture* doesn't also give: some ffmpeg versions (8.0) complain about
+# the fixtures themselves.
+private def decoded_frames(bytes : Bytes, extension : String, fixture : String) : Int32
+  path = File.tempname("join", ".#{extension}")
+  File.write(path, bytes)
+  output, errors = ffmpeg_decode(path)
+  _, expected = ffmpeg_decode("#{FIXTURES}/#{fixture}")
+  (errors - expected).should be_empty
+  output.lines.count { |line| !line.starts_with?('#') }
 ensure
   File.delete(path) if path && File.exists?(path)
 end
@@ -64,7 +74,7 @@ describe "Late-joining listeners" do
     bytes_start_with?(burst, header).should be_true
     burst.size.should be < bytes.size
     FLAC.frame_header(burst[header.size..]).should_not be_nil
-    decoded_frames(burst, "flac").should be > 3
+    decoded_frames(burst, "flac", "tone.flac").should be > 3
     mount.format.should eq("flac")
   end
 
@@ -80,7 +90,7 @@ describe "Late-joining listeners" do
     # The STREAMINFO packet's page and the Vorbis comment page.
     burst.size.should be < bytes.size
     String.new(burst[28, 5]).should eq("\u007FFLAC")
-    decoded_frames(burst, "oga").should be > 3
+    decoded_frames(burst, "oga", "tone.oga").should be > 3
   end
 
   it "get WebM headers and a cluster made for them in the middle of one" do
@@ -93,7 +103,7 @@ describe "Late-joining listeners" do
     bytes_start_with?(burst, header).should be_true
     burst.size.should be < bytes.size
     burst[header.size, 4].should eq(Bytes[0x1F, 0x43, 0xB6, 0x75])
-    decoded_frames(burst, "webm").should be > 10
+    decoded_frames(burst, "webm", "tone.webm").should be > 10
     mount.format.should eq("webm")
   end
 
@@ -103,7 +113,7 @@ describe "Late-joining listeners" do
     publish_file(mount, "clip.webm")
     burst = mount.initial_burst
 
-    decoded_frames(burst, "webm").should be > 5
+    decoded_frames(burst, "webm", "clip.webm").should be > 5
   end
 
   it "wait for the next join point when the buffer has none" do
@@ -127,7 +137,7 @@ describe "Late-joining listeners" do
     wait_until { listener.size > header.size + 1000 }
     received = listener.to_slice.dup
     received[header.size, 4].should eq(Bytes[0x1F, 0x43, 0xB6, 0x75])
-    decoded_frames(received, "webm").should be > 10
+    decoded_frames(received, "webm", "clip.webm").should be > 10
     received.size.should eq(header.size + bytes.size - 8039)
   ensure
     mount.try(&.remove_listener(listener)) if listener
@@ -161,6 +171,6 @@ describe "Late-joining listeners" do
     bytes = publish_file(mount, "tone.webm")
     header = join_header(mount)
     bytes_start_with?(bytes, header).should be_true
-    decoded_frames(mount.initial_burst, "webm").should be > 10
+    decoded_frames(mount.initial_burst, "webm", "tone.webm").should be > 10
   end
 end
