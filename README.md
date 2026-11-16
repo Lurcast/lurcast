@@ -23,8 +23,9 @@ See [LICENSING.md](LICENSING.md) for details.
 - Plain HTTP and native TLS listeners
 - Direct Icecast mount URLs plus SHOUTcast v1 `/;` and v2 `/stream/<sid>` listener aliases
 - MP3 MPEG 1/2/2.5 Layer I/II/III, including free-format streams, plus AAC ADTS and LATM/LOAS frame synchronization, with malformed source bytes removed before fanout
-- Ogg Vorbis, Opus, Theora, Speex, and Skeleton pass-through, including multiplexed logical streams
-- Mid-stream joins: MP3 and AAC bursts start at verified frame boundaries; Ogg bursts contain every logical stream's cached headers and resume at safe complete pages
+- Ogg Vorbis, Opus, FLAC, Speex, and Skeleton pass-through, including multiplexed logical streams
+- Native FLAC and WebM (Opus or Vorbis) pass-through
+- Mid-stream joins: MP3 and AAC bursts start at verified frame boundaries; Ogg bursts contain every logical stream's cached headers and resume at safe complete pages; FLAC and WebM listeners get the stream's headers, then audio from a FLAC frame or a WebM block (in a cluster header made for them)
 - Other container/codecs are relayed transparently, without format-specific mid-stream repair
 - Basic authentication for source and admin requests, plus an external URL authentication lifecycle
 - Reconnecting and on-demand HTTP(S) pull relays, Icecast master discovery, and source/file fallback chains

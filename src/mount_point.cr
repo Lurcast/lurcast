@@ -3,6 +3,8 @@ require "deque"
 require "http/headers"
 require "mime/media_type"
 require "./aac"
+require "./flac"
+require "./matroska"
 require "./mp3"
 require "./ogg"
 require "./source_protocol"
@@ -112,6 +114,8 @@ class MountPoint
     getter metadata_interval : Int32
     property remaining : Int32
     getter? wants_metadata : Bool
+    # Set while the listener has a stream's headers but waits for a place to start the audio.
+    property? awaiting_join : Bool = false
     @metadata_version = Atomic(UInt64).new(UInt64::MAX)
     @owner : MountPoint
     @owner_mutex = Mutex.new
@@ -261,6 +265,8 @@ class MountPoint
   @frame_synced = false
   @taps = [] of AudioTap
   @aac_transport : AAC::Transport?
+  # Join points for formats whose listeners need headers first (native FLAC, Matroska and WebM).
+  @join : StreamJoin?
 
   def initialize(
     @mount : String,
@@ -280,6 +286,7 @@ class MountPoint
       @source = io
       @source_protocol = protocol
     end
+    @broadcast_mutex.synchronize { @join = new_join }
   end
 
   def source : IO?
@@ -429,7 +436,8 @@ class MountPoint
     listener = Listener.new(io, address, wants_metadata, requested_mount, self, @queue_size, @metadata_interval, id, user_agent, country)
 
     @broadcast_mutex.synchronize do
-      burst = initial_burst
+      burst, waiting = listener_start
+      listener.awaiting_join = waiting
       @listeners_mutex.synchronize do
         @listeners[io] = listener
         @total_connections += 1
@@ -468,12 +476,13 @@ class MountPoint
   def adopt_listeners(listeners : Array(Listener))
     return if listeners.empty?
     @broadcast_mutex.synchronize do
-      burst = initial_burst
+      burst, waiting = listener_start
       @listeners_mutex.synchronize do
         listeners.each do |listener|
           next if listener.io.closed?
           listener.queue.clear
           listener.metadata_version = UInt64::MAX
+          listener.awaiting_join = waiting
           unless burst.empty? || listener.queue.enqueue(burst)
             listener.close
             next
@@ -500,14 +509,25 @@ class MountPoint
       capture_mp3_info(stream_data) if mp3?
       @aac_transport ||= AAC.parse_header(stream_data).try(&.transport) if aac?
       capture_ogg_headers(stream_data) if ogg?
+      join = @join
+      chunk_start = join.try(&.position) || 0_i64
+      join.try(&.feed(stream_data))
       append_to_buffer(stream_data)
       @taps.each(&.receive(stream_data))
       dead = nil.as(Array(Listener)?)
       @listeners_mutex.synchronize do
         return if @listeners.empty?
         shared_packet = stream_data.dup
+        joined = nil.as(Bytes?)
         @listeners.each_value do |listener|
-          unless listener.queue.enqueue(shared_packet)
+          packet = shared_packet
+          if listener.awaiting_join?
+            joined ||= join.try { |active| join_packet(active, chunk_start, stream_data) } || Bytes.empty
+            next if joined.empty?
+            packet = joined
+            listener.awaiting_join = false
+          end
+          unless listener.queue.enqueue(packet)
             (dead ||= [] of Listener) << listener
           end
         end
@@ -577,11 +597,49 @@ class MountPoint
   end
 
   def initial_burst : Bytes
+    return listener_start[0] if @join.try(&.header)
     audio = buffered_audio
     return align_mp3(audio) if mp3?
     return align_aac(audio) if aac?
     return ogg_burst(audio) if ogg?
     audio
+  end
+
+  # The audio a new listener starts with, and whether it must wait for a join point before getting
+  # more: with a native FLAC or Matroska stream, the headers and then the stream from a clean boundary.
+  private def listener_start : {Bytes, Bool}
+    join = @join
+    header = join.try(&.header)
+    return {initial_burst, false} unless join && header
+    audio = buffered_audio
+    from = join.position - audio.size
+    point = join.join(from) || return {header, true}
+    tail = audio[point.offset - from..]
+    result = Bytes.new(point.header.size + point.extra.size + tail.size)
+    point.header.copy_to(result)
+    point.extra.copy_to(result[point.header.size, point.extra.size])
+    tail.copy_to(result[point.header.size + point.extra.size, tail.size])
+    {result, false}
+  end
+
+  # The packet for a listener waiting to join: from the first join point in this chunk, if any.
+  private def join_packet(join : StreamJoin, chunk_start : Int64, data : Bytes) : Bytes?
+    point = join.join(chunk_start) || return
+    return unless point.offset < chunk_start + data.size
+    tail = data[point.offset - chunk_start..]
+    result = Bytes.new(point.extra.size + tail.size)
+    point.extra.copy_to(result)
+    tail.copy_to(result[point.extra.size, tail.size])
+    result
+  end
+
+  private def new_join : StreamJoin?
+    window = @buffer.size * 2
+    if flac?
+      FLAC::Join.new(window)
+    elsif matroska?
+      Matroska::Join.new(window)
+    end
   end
 
   def disconnect
@@ -763,6 +821,7 @@ class MountPoint
       @frame_pending.clear
       @frame_synced = false
       @mp3_free_format_bytes = nil
+      @join = new_join
     end
   end
 
@@ -778,7 +837,19 @@ class MountPoint
     return "mp3" if mp3?
     return "aac" if aac?
     return "ogg" if ogg?
+    return "flac" if flac?
+    return "webm" if media_type.ends_with?("/webm")
+    return "matroska" if matroska?
     media_type
+  end
+
+  # Native FLAC; FLAC in Ogg is "ogg".
+  private def flac? : Bool
+    media_type.in?("audio/flac", "audio/x-flac")
+  end
+
+  private def matroska? : Bool
+    media_type.in?("audio/webm", "video/webm", "audio/x-matroska", "video/x-matroska", "audio/matroska", "video/matroska")
   end
 
   private def aac? : Bool
@@ -846,6 +917,12 @@ class MountPoint
         stream.expected_headers = ogg_header_count(packet)
       end
       stream.header_packets += 1
+      if stream.expected_headers == OGG_FLAC_UNTIL_LAST
+        # Ogg FLAC that doesn't say how many header packets follow: they end with the metadata block
+        # marked last (the first packet's STREAMINFO, or the first byte of a later packet).
+        flags = stream.header_packets == 1 ? packet[13]? : packet[0]?
+        stream.headers_complete = true if flags.try { |byte| byte & 0x80 != 0 }
+      end
       stream.packet.clear
       if stream.expected_headers.positive? && stream.header_packets >= stream.expected_headers
         stream.headers_complete = true
@@ -853,7 +930,15 @@ class MountPoint
     end
   end
 
+  # Ogg FLAC header packets: the first one, then as many as it says, or (when it says 0) up to the
+  # last metadata block.
+  OGG_FLAC_UNTIL_LAST = -1
+
   private def ogg_header_count(packet : Bytes) : Int32
+    if bytes_start_with?(packet, "\x7FFLAC") && packet.size >= 9
+      count = IO::ByteFormat::BigEndian.decode(UInt16, packet[7, 2]).to_i
+      return count.positive? ? count + 1 : OGG_FLAC_UNTIL_LAST
+    end
     return 2 if bytes_start_with?(packet, "OpusHead")
     return 3 if packet.size >= 7 && {0x01_u8, 0x80_u8}.includes?(packet[0]) && bytes_start_with?(packet[1..], packet[0] == 0x01 ? "vorbis" : "theora")
     return 2 if bytes_start_with?(packet, "Speex   ")

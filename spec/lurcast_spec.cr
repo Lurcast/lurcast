@@ -308,6 +308,19 @@ describe Lurcast do
     mount.initial_burst.should eq(head + tags + audio)
   end
 
+  it "keeps every Ogg FLAC header packet, up to the last metadata block when the count is 0" do
+    mount = MountPoint.new("/radio.oga", 60)
+    mount.apply_headers(HTTP::Headers{"Content-Type" => "audio/ogg"})
+    # Mapping version 1.0, 0 header packets announced, then STREAMINFO (not the last block).
+    first = "\u007FFLAC".to_slice + Bytes[1, 0, 0, 0] + "fLaC".to_slice + Bytes[0x00, 0, 0, 34] + Bytes.new(34)
+    head = ogg_page(0_u32, 2_u8, first)
+    comment = ogg_page(1_u32, 0_u8, Bytes[0x84, 0, 0, 4, 0, 0, 0, 0])
+    audio = ogg_page(2_u32, 0_u8, Bytes.new(20, 7_u8))
+    {head, comment, audio}.each { |page| mount.publish(page) }
+
+    mount.initial_burst.should eq(head + comment + audio)
+  end
+
   it "preserves every logical stream header in multiplexed Ogg bursts" do
     mount = MountPoint.new("/radio.ogg", 128)
     mount.apply_headers(HTTP::Headers{"Content-Type" => "audio/ogg"})
