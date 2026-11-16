@@ -44,6 +44,15 @@ private def bytes_start_with?(bytes : Bytes, prefix : Bytes) : Bool
   bytes.size >= prefix.size && bytes[0, prefix.size] == prefix
 end
 
+private class SpecFailingTap < AudioTap
+  getter calls = 0
+
+  def receive(data : Bytes) : Nil
+    @calls += 1
+    raise "broken tap"
+  end
+end
+
 describe "Late-joining listeners" do
   it "get a native FLAC stream's headers, then audio from a frame" do
     mount = mount_for("audio/flac")
@@ -122,6 +131,27 @@ describe "Late-joining listeners" do
     received.size.should eq(header.size + bytes.size - 8039)
   ensure
     mount.try(&.remove_listener(listener)) if listener
+  end
+
+  it "finds FLAC frames when the headers end exactly with a chunk" do
+    bytes = File.read("#{FIXTURES}/tone.flac").to_slice
+    reader = FLAC::HeaderReader.new
+    reader.feed(bytes)
+    header_size = reader.header.size
+    join = FLAC::Join.new(1 << 20)
+    join.feed(bytes[0, header_size])
+    join.header.should eq(bytes[0, header_size])
+    join.feed(bytes[header_size..])
+    join.join(0_i64).try(&.offset).should eq(header_size)
+  end
+
+  it "keeps the source going when a tap fails" do
+    mount = mount_for("audio/flac")
+    failing = SpecFailingTap.new
+    mount.add_tap(failing)
+    publish_file(mount, "tone.flac")
+    failing.calls.should eq(1)
+    mount.initial_burst.size.should be > 0
   end
 
   it "replaces the headers when the source starts again" do

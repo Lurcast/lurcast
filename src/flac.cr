@@ -182,10 +182,11 @@ module FLAC
         rest = @reader.rest
         # Frames start right after the headers.
         start = @position + data.size - rest.size
-        @points << start unless rest.empty?
-        data = rest
         @tail = Bytes.empty
-        find_frames(data, start, skip: 1)
+        # The headers may end with the chunk: the first frame then starts the next one.
+        return if rest.empty?
+        @points << start
+        find_frames(rest, start, skip: 1)
         return
       end
       find_frames(data, @position)
@@ -208,7 +209,8 @@ module FLAC
         end
         index += 1
       end
-      keep = Math.min(bytes.size - Math.max(index, 0), HEADER_PROBE)
+      # The bytes not checked yet: too few to hold a whole frame header.
+      keep = (bytes.size - index).clamp(0, HEADER_PROBE)
       @tail = bytes[bytes.size - keep, keep].dup
     end
 

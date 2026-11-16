@@ -511,9 +511,9 @@ class MountPoint
       capture_ogg_headers(stream_data) if ogg?
       join = @join
       chunk_start = join.try(&.position) || 0_i64
-      join.try(&.feed(stream_data))
+      join = feed_join(join, stream_data) if join
       append_to_buffer(stream_data)
-      @taps.each(&.receive(stream_data))
+      feed_taps(stream_data)
       dead = nil.as(Array(Listener)?)
       @listeners_mutex.synchronize do
         return if @listeners.empty?
@@ -631,6 +631,27 @@ class MountPoint
     point.extra.copy_to(result)
     tail.copy_to(result[point.extra.size, tail.size])
     result
+  end
+
+  # A failure while finding join points must not end the source: listeners then join as they would
+  # any other format.
+  private def feed_join(join : StreamJoin, data : Bytes) : StreamJoin?
+    join.feed(data)
+    join
+  rescue ex
+    Log.error(exception: ex) { "#{@mount}: stopped finding join points in the stream" }
+    @join = nil
+  end
+
+  # Taps that fail are removed, so one (such as a plugin's) can't end the source.
+  private def feed_taps(data : Bytes) : Nil
+    @taps.reject! do |tap|
+      tap.receive(data)
+      false
+    rescue ex
+      Log.error(exception: ex) { "#{@mount}: removed #{tap.class.name}, which failed" }
+      true
+    end
   end
 
   private def new_join : StreamJoin?
