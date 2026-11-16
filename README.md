@@ -43,19 +43,21 @@ See [LICENSING.md](LICENSING.md) for details.
 - An access log in the combined format, and reloading `config.yml` without a restart
 - Listener history charts (24 hours to 12 months) and a ban list for addresses, address ranges, and players
 - HTTP and `ICY 200 OK` listener responses for Icecast/Shoutcast-compatible players
-- Built-in plugins: automatic HTTPS with Let's Encrypt, transcoding to Opus, cover art (including SHOUTcast 2 album art), and listener logins from `htpasswd` files
+- Built-in plugins: automatic HTTPS with Let's Encrypt, transcoding to Opus or MP3, cover art (including SHOUTcast 2 album art), and listener logins from `htpasswd` files
 
-Lurcast relays encoded audio as the source sends it; the optional transcode plugin can also publish an Opus copy of a mount.
+Lurcast relays encoded audio as the source sends it; the optional transcode plugin can also publish a copy of a mount in another codec or at another bit rate.
 
 ## Install
 
-Download a static Linux binary (x86-64 or ARM64) from the [latest release](https://github.com/lurcast/lurcast/releases/latest):
+Download the build for your machine (`amd64` or `arm64`) from the [latest release](https://github.com/lurcast/lurcast/releases/latest) and unpack it:
 
 ```sh
-curl -fLo lurcast https://github.com/lurcast/lurcast/releases/latest/download/lurcast-linux-amd64
-chmod +x lurcast
-./lurcast --config config.yml
+curl -fL https://github.com/lurcast/lurcast/releases/latest/download/lurcast-linux-amd64.tar.gz | sudo tar xz -C /opt
+sudo ln -sf /opt/lurcast/lurcast /usr/local/bin/lurcast
+lurcast --config config.yml
 ```
+
+`/opt/lurcast` holds Lurcast with the shared libraries it uses and musl's dynamic loader, so it runs on any Linux distribution; the `lurcast` script starts it with them. To update, unpack a newer release over it.
 
 Or run the Docker image:
 
@@ -67,7 +69,7 @@ docker run -p 8000:8000 -e LURCAST_SOURCE_PASSWORD=... -e LURCAST_ADMIN_PASSWORD
 
 Crystal 1.21.0 or newer is required. The repository's `.tool-versions` selects 1.21.0 for asdf users.
 
-Install libogg and libopus with `brew install libogg opus` on macOS or `sudo apt install libogg-dev libopus-dev` on Debian/Ubuntu, plus a C compiler (the bundled decoders in `ext/` are compiled during the build).
+Install libogg, libopus, and LAME with `brew install libogg opus lame` on macOS or `sudo apt install libogg-dev libopus-dev libmp3lame-dev` on Debian/Ubuntu, plus a C compiler (the bundled decoders in `ext/` are compiled during the build). The specs also use the `ffmpeg` command to check audio.
 
 ```sh
 shards build --release
@@ -211,7 +213,7 @@ Mounts get an HLS playlist at `/<mount>.m3u8` (for example `/live.m3u8`) for bro
 
 With `low_latency: true`, AAC, Opus, and FLAC mounts use fragmented MP4 cut into parts of `part_seconds`, which players fetch as soon as each is ready, and players can wait for the next part instead of polling (blocking playlist reloads and preload hints). With 0.5-second parts, players stayed about 2 seconds behind live in testing, instead of three segments. MP3 keeps packed audio and normal latency.
 
-A variant list publishes a multivariant playlist at `/<name>.m3u8` that offers each listed mount that is on the air, with its measured bandwidth and codec, so players pick the one that suits their connection. Pair it with the transcode plugin to offer, say, AAC at 128 kbps and Opus at 32 kbps.
+A variant list publishes a multivariant playlist at `/<name>.m3u8` that offers each listed mount that is on the air, with its measured bandwidth and codec, so players pick the one that suits their connection. Pair it with the transcode plugin to offer, say, AAC at 128 kbps from your encoder and an Opus copy at 32 kbps.
 
 HLS listeners are counted as addresses that fetched a segment recently, and count in the listener history. Playlist and segment requests don't count against `rate_limit`, because players make them all the time; `max_connections_per_ip` still applies, and a low-latency player holds two connections. Listener logins and the ban list apply to the playlist and every segment, but listener limits don't. The `url_auth` plugin checks listeners one connection at a time, so HLS stays off while it is on.
 
@@ -356,9 +358,9 @@ Lurcast checks the certificate at startup and every 12 hours. If it can't get on
 - Ports 80 and 443 need root or `CAP_NET_BIND_SERVICE` (for example `setcap 'cap_net_bind_service=+ep' /usr/local/bin/lurcast`, or `AmbientCapabilities=CAP_NET_BIND_SERVICE` in a systemd unit).
 - Certificates are kept per certificate authority, so moving from the staging directory to the real one gets a new certificate. `kill -HUP` makes Lurcast check the stored certificate again at once; changing the domains or ports needs a restart.
 
-### Transcoding to Opus
+### Transcoding
 
-Re-encodes a mount as Opus (in Ogg) on another mount, for example a low-bitrate copy of your MP3 stream for listeners on mobile data. It reads MP3, Ogg Vorbis, and Ogg Opus sources. AAC and other formats can't be transcoded: Lurcast logs a warning and doesn't publish the target.
+Re-encodes a mount on another mount: for example a low-bitrate Opus copy of your stream for listeners on mobile data, or an MP3 copy of an Opus stream for older players. It reads MP3, Ogg Vorbis, and Ogg Opus sources; AAC sources can't be transcoded.
 
 ```yaml
 plugins:
@@ -366,19 +368,31 @@ plugins:
     streams:
       - source: /live          # mount to read
         mount: /live.opus      # mount to publish
-        bitrate: 64            # kbps, 6 to 256 (default 64)
+        codec: opus            # opus (Ogg Opus) or mp3; default opus
+        bitrate: 64            # kbps; default 64 for Opus, 128 for MP3
         channels: 2            # 1 or 2 (default 2)
+      - source: /live
+        mount: /live.mp3
+        codec: mp3
+        bitrate: 128
       - source: /live
         mount: /live-mobile.opus
         bitrate: 24
         channels: 1
 ```
 
-The target mount appears while the source mount has a source connected, and goes away about two seconds after it disconnects (its listeners move to its fallback, if one is set); a source that reconnects within that time keeps the same Opus stream going. Song titles on the source are copied to the target, and the station name, genre, description, and URL are copied when the target starts. Audio is resampled to 48 kHz and encoded in 20 ms Opus frames. Each stream costs a few percent of one CPU core.
+| Codec | Bit rates | Output |
+|---|---|---|
+| `opus` | 6 to 256 kbps | Ogg Opus, 48 kHz, 20 ms frames |
+| `mp3` | 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 192, 224, 256, or 320 kbps | constant bit rate MP3; 44.1 kHz from 96 kbps, a lower rate below that |
+
+At low bit rates Opus sounds clearly better than MP3.
+
+The target mount appears while the source mount has a source connected, and goes away about two seconds after it disconnects (its listeners move to its fallback, if one is set); a source that reconnects within that time keeps the same stream going. Song titles on the source are copied to the target, and the station name, genre, description, and URL are copied when the target starts. Each stream costs a few percent of one CPU core.
 
 Each target must be unique, can't be its own source, and streams can't feed into each other in a loop. Changes to the list apply on a configuration reload (`kill -HUP`), restarting the streams that changed.
 
-Only permissively licensed codecs are built in, so there is no MP3 or AAC output and no AAC input. Building from source needs libopus (`brew install opus` or `apt install libopus-dev`) and a C compiler: the MP3 and Vorbis decoders and the resampler are in `ext/` and are compiled automatically.
+MP3 is encoded with [LAME](https://lame.sourceforge.io/), under the LGPL; see [LICENSING.md](LICENSING.md#third-party-code). Releases include it as a separate shared library, `lib/libmp3lame.so.0`, built by `ext/build-lame.sh`, which you can replace with your own build.
 
 ### Writing a plugin
 
@@ -538,14 +552,14 @@ Icecast HTTP, SHOUTcast v1, SHOUTcast v2/Ultravox, relays, and fallback files ar
 
 ## Deploy
 
-The `Dockerfile` builds a static binary on Alpine and runs it as an unprivileged user. Mount a config at `/etc/lurcast/config.yml` or configure with environment variables:
+The `Dockerfile` builds the same folder as the release tarballs on Alpine (`deploy/bundle.sh`) and runs it as an unprivileged user. Mount a config at `/etc/lurcast/config.yml` or configure with environment variables:
 
 ```sh
 docker build -t lurcast .
 docker run -p 8000:8000 -e LURCAST_SOURCE_PASSWORD=... -e LURCAST_ADMIN_PASSWORD=... -e LURCAST_RELAY_PASSWORD=... lurcast
 ```
 
-For systemd hosts, `deploy/lurcast.service` is a hardened unit that runs `/usr/local/bin/lurcast` as the `lurcast` user. Each listener holds one socket, so keep the open file limit (`LimitNOFILE`, or `ulimit -n`) above `max_listeners`.
+For systemd hosts, `deploy/lurcast.service` is a hardened unit that runs `/usr/local/bin/lurcast` (the link made when installing) as the `lurcast` user. Each listener holds one socket, so keep the open file limit (`LimitNOFILE`, or `ulimit -n`) above `max_listeners`.
 
 ## Load test
 

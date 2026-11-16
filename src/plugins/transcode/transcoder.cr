@@ -26,15 +26,16 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
   end
 
   # The target mount, fed through a pipe: the server reads the pipe as an internal source, and the
-  # worker writes Ogg pages into it.
+  # worker writes the encoded stream into it.
   class Output
     @reader : IO
     @writer : IO
+    @stream : StreamWriter
     @served = Channel(Nil).new
 
-    def initialize(@server : IcecastServer, @mount : String, headers : HTTP::Headers, channels : Int32, pre_skip : Int32)
+    def initialize(@server : IcecastServer, @mount : String, headers : HTTP::Headers, encoder : Encoder)
       @reader, @writer = IO.pipe
-      @ogg = OggOpusWriter.new(@writer, channels, pre_skip)
+      @stream = encoder.writer(@writer)
       reader = @reader
       spawn(name: "transcode #{@mount}") do
         unless @server.serve_source(@mount, reader, headers)
@@ -47,7 +48,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
     end
 
     def write(packet : Bytes) : Nil
-      @ogg.write(packet)
+      @stream.write(packet)
     end
 
     # The target mount while this output is its source.
@@ -57,7 +58,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
 
     # Ends the stream and waits a moment for the server to release the target mount.
     def close : Nil
-      @ogg.flush rescue nil
+      @stream.flush rescue nil
       @writer.close rescue nil
       select
       when @served.receive?
@@ -204,7 +205,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
     end
 
     private def work(queue : Channel(QueueItem), done : Channel(Nil)) : Nil
-      encoder = OpusEncoder.new(@entry.bitrate, @entry.channels)
+      encoder = Encoder.for(@entry.codec, @entry.bitrate, @entry.channels)
       decoder = nil.as(Decoder?)
       retry_at = nil.as(Time::Instant?)
       title_applied = false
@@ -254,9 +255,9 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
       done.close
     end
 
-    private def open_output(encoder : OpusEncoder) : Output
+    private def open_output(encoder : Encoder) : Output
       details = @mutex.synchronize { @details }
-      headers = HTTP::Headers{"Content-Type" => "audio/ogg", "Icy-Br" => @entry.bitrate.to_s}
+      headers = HTTP::Headers{"Content-Type" => encoder.content_type, "Icy-Br" => @entry.bitrate.to_s}
       if details
         headers["Ice-Name"] = details.name unless details.name.empty?
         headers["Ice-Genre"] = details.genre unless details.genre.empty?
@@ -264,7 +265,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
         headers["Ice-URL"] = details.url unless details.url.empty?
         headers["Ice-Public"] = details.listed ? "1" : "0"
       end
-      output = Output.new(@server, @entry.mount, headers, encoder.channels, encoder.pre_skip)
+      output = Output.new(@server, @entry.mount, headers, encoder)
       @mutex.synchronize { @output = output }
       output
     end

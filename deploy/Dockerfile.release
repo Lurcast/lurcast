@@ -1,12 +1,14 @@
-# Release image: packages the static binaries built by .github/workflows/release.yml (dist/).
+# Release image: packages the tarballs built by .github/workflows/release.yml (dist/).
 # For a local build from source, use the Dockerfile in the repository root instead.
 FROM alpine:3.22
 ARG TARGETARCH
 RUN apk add --no-cache ca-certificates \
     && addgroup -S lurcast && adduser -S -G lurcast -H lurcast \
     && mkdir -p /etc/lurcast /var/lib/lurcast && chown lurcast:lurcast /var/lib/lurcast
-COPY --chmod=0755 dist/lurcast-linux-${TARGETARCH} /usr/local/bin/lurcast
-COPY LICENSE LICENSING.md THIRD_PARTY_NOTICES.txt /usr/share/licenses/lurcast/
+# ADD unpacks the tarball: /opt/lurcast holds the binary, its libraries, and the license files.
+ADD dist/lurcast-linux-${TARGETARCH}.tar.gz /opt/
+RUN ln -s /opt/lurcast/lurcast /usr/local/bin/lurcast \
+    && mkdir -p /usr/share/licenses && ln -s /opt/lurcast /usr/share/licenses/lurcast
 USER lurcast
 EXPOSE 8000
 # Bans and listener history; mount a volume here to keep them.

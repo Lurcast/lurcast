@@ -132,6 +132,7 @@ describe Lurcast::Plugins::Transcode do
     plugin.name.should eq("transcode")
     entry = plugin.entries.first
     {entry.source, entry.mount, entry.bitrate, entry.channels, entry.codec}.should eq({"/live", "/live.opus", 64, 2, "opus"})
+    build_transcode("- {source: /live, mount: /live.mp3, codec: mp3}").try(&.entries.first.bitrate).should eq(128)
 
     chain = build_transcode("[{source: /live, mount: /a.opus, bitrate: 6, channels: 1}, {source: /a.opus, mount: /b.opus, bitrate: 256}]")
     chain.should_not be_nil
@@ -143,7 +144,9 @@ describe Lurcast::Plugins::Transcode do
       "- {source: /live, mount: /live.opus, bitrate: 5}"                            => "6 to 256 kbps",
       "- {source: /live, mount: /live.opus, bitrate: 257}"                          => "6 to 256 kbps",
       "- {source: /live, mount: /live.opus, channels: 6}"                           => "must be 1 or 2",
-      "- {source: /live, mount: /live.opus, codec: aac}"                            => "must be opus",
+      "- {source: /live, mount: /live.ogg, codec: vorbis}"                          => "must be opus or mp3",
+      "- {source: /live, mount: /live.aac, codec: aac}"                             => "must be opus or mp3",
+      "- {source: /live, mount: /live.mp3, codec: mp3, bitrate: 100}"               => "one of 8, 16,",
       "[{source: /live, mount: /x.opus}, {source: /other, mount: /x.opus}]"         => "more than one stream",
       "[{source: /a, mount: /b}, {source: /b, mount: /a}]"                          => "feeds back into itself",
       "[{source: /a, mount: /b}, {source: /b, mount: /c}, {source: /c, mount: /a}]" => "feeds back into itself",
@@ -202,6 +205,7 @@ describe Lurcast::Plugins::Transcode do
     rms(samples).should be > 0.05
 
     Transcode::Decoder.for("aac").should be_nil
+    Transcode::Decoder.for("webm").should be_nil
     Transcode::Decoder.supported?("audio/webm").should be_false
     flac = IO::Memory.new
     flac.write(ogg_page(0_u32, 0x02_u8, "\x7FFLAC\x01\x00".to_slice))
@@ -288,24 +292,84 @@ describe Lurcast::Plugins::Transcode do
   end
 
   it "doesn't publish a target for a source it can't decode" do
-    config = transcode_config("- {source: /aac, mount: /aac.opus}")
+    config = transcode_config("- {source: /video, mount: /video.opus}")
     http_listener = TCPServer.new("127.0.0.1", 0)
     port = http_listener.local_address.as(Socket::IPAddress).port
     server = IcecastServer.new(config)
     spawn server.serve(http_listener)
     Fiber.yield
 
-    source = connect_source(port, "/aac", "audio/aac")
+    source = connect_source(port, "/video", "video/webm")
     begin
       20.times do
-        source.write(aac_frame)
+        source.write(Bytes.new(200, 7_u8))
         source.flush
         sleep 25.milliseconds
       end
-      wait_until { server.get_mount("/aac").try(&.has_source?) || false }
+      wait_until { server.get_mount("/video").try(&.has_source?) || false }
       sleep 600.milliseconds
-      server.get_mount("/aac.opus").should be_nil
+      server.get_mount("/video.opus").should be_nil
     ensure
+      source.close
+    end
+  ensure
+    server.try(&.stop)
+  end
+
+  it "encodes MP3 that ffmpeg decodes, from MP3, Vorbis and Opus" do
+    encoder = Transcode::Encoder.for("mp3", 128, 2)
+    output = IO::Memory.new
+    writer = encoder.writer(output)
+    {"tone-44100-stereo.mp3" => "mp3", "tone.ogg" => "ogg", "tone.opus" => "ogg"}.each do |name, format|
+      decoder = Transcode::Decoder.for(format).should_not be_nil
+      transcode_fixture(name).each_slice(1000) do |chunk|
+        decoder.decode(Slice.new(chunk.to_unsafe, chunk.size)) do |pcm, channels, rate|
+          encoder.encode(pcm, channels, rate) { |packet| writer.write(packet) }
+        end
+      end
+      decoder.close
+    end
+    encoder.close
+    MP3.parse_frame(output.to_slice).try(&.bitrate_kbps).should eq(128)
+
+    path = File.tempname("transcode", ".mp3")
+    File.write(path, output.to_slice)
+    begin
+      errors = IO::Memory.new
+      probe = IO::Memory.new
+      Process.run("ffmpeg", ["-v", "error", "-i", path, "-f", "null", "-"], error: errors).success?.should be_true
+      errors.to_s.should eq("")
+      Process.run("ffprobe", ["-v", "error", "-show_entries", "stream=codec_name,sample_rate,channels:format=duration", "-of", "csv=p=0", path], output: probe)
+      lines = probe.to_s.lines
+      lines[0].should eq("mp3,44100,2")
+      # 3 s of MP3, then 1 s each of Vorbis and Opus.
+      lines[1].to_f.should be_close(5.0, 0.2)
+    ensure
+      File.delete(path)
+    end
+  end
+
+  it "publishes an MP3 mount for a live Ogg Opus source" do
+    config = transcode_config("- {source: /opus, mount: /opus.mp3, codec: mp3, bitrate: 64}")
+    http_listener = TCPServer.new("127.0.0.1", 0)
+    port = http_listener.local_address.as(Socket::IPAddress).port
+    server = IcecastServer.new(config)
+    spawn server.serve(http_listener)
+    Fiber.yield
+
+    source = connect_source(port, "/opus", "audio/ogg")
+    done = Channel(Nil).new
+    begin
+      loop_audio(source, File.read(File.join(__DIR__, "..", "fixtures", "hls", "tone.opus")).to_slice, done)
+      wait_until(5.seconds) { !server.get_mount("/opus.mp3").nil? }
+      target = server.get_mount("/opus.mp3").should_not be_nil
+      target.content_type.should eq("audio/mpeg")
+      target.format.should eq("mp3")
+      wait_until(5.seconds) { target.mp3_info.try(&.bitrate_kbps) == 64 }
+      info = target.mp3_info.should_not be_nil
+      info.channels.should eq(2)
+    ensure
+      done.close
       source.close
     end
   ensure

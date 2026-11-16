@@ -2,9 +2,10 @@ require "http/headers"
 require "../plugin"
 
 module Lurcast::Plugins
-  # Re-encodes a mount as Opus in Ogg on another mount, for example a low-bitrate version of a live
-  # MP3 stream for mobile listeners. The source mount can be MP3, Ogg Vorbis or Ogg Opus; the target
-  # mount exists while the source has a source client, and follows the source's song titles.
+  # Re-encodes a mount on another mount, for example a low-bitrate Opus version of a live stream for
+  # mobile listeners, or an MP3 copy of an Opus stream for older players. The source mount can be
+  # MP3, Ogg Vorbis or Ogg Opus; the target mount exists while the source has a source client, and
+  # follows the source's song titles.
   #
   # ```yaml
   # plugins:
@@ -12,14 +13,14 @@ module Lurcast::Plugins
   #     streams:
   #       - source: /live        # mount to read
   #         mount: /live.opus    # mount to publish
-  #         bitrate: 64          # kbps, 6 to 256 (default 64)
+  #         codec: opus          # opus (Ogg Opus) or mp3; default opus
+  #         bitrate: 64          # kbps; default 64 for Opus, 128 for MP3
   #         channels: 2          # 1 or 2 (default 2)
-  #         codec: opus          # the only codec for now
   # ```
   class Transcode < Plugin
     register "transcode"
 
-    BITRATES = 6..256
+    CODECS = {"opus", "mp3"}
 
     # One stream to publish.
     class Entry
@@ -28,11 +29,24 @@ module Lurcast::Plugins
 
       getter source : String
       getter mount : String
-      getter bitrate : Int32 = 64
-      getter channels : Int32 = 2
       getter codec : String = "opus"
+      # 0 until `after_initialize` sets the codec's default.
+      getter bitrate : Int32 = 0
+      getter channels : Int32 = 2
 
       def_equals_and_hash source, mount, bitrate, channels, codec
+
+      def after_initialize
+        @bitrate = codec == "opus" ? 64 : 128 if @bitrate.zero?
+      end
+
+      # The bit rates the codec takes, in kbps, as text for an error message, or nil when *bitrate* is one.
+      def bitrate_error : String?
+        case codec
+        when "opus" then "6 to 256 kbps" unless 6 <= bitrate <= 256
+        when "mp3"  then "one of #{MP3Encoder::BITRATES.join(", ")} kbps" unless MP3Encoder::BITRATES.includes?(bitrate)
+        end
+      end
     end
 
     class Settings < Plugin::Settings
@@ -50,9 +64,9 @@ module Lurcast::Plugins
             invalid("mount names must start with /: #{mount.inspect}") unless mount.starts_with?('/') && mount.size > 1
           end
           invalid("#{entry.mount} can't transcode itself") if entry.mount == entry.source
-          invalid("bitrate for #{entry.mount} must be #{BITRATES.begin} to #{BITRATES.end} kbps") unless BITRATES.includes?(entry.bitrate)
+          invalid("codec for #{entry.mount} must be opus or mp3") unless CODECS.includes?(entry.codec)
+          entry.bitrate_error.try { |range| invalid("bitrate for #{entry.mount} must be #{range}") }
           invalid("channels for #{entry.mount} must be 1 or 2") unless entry.channels.in?(1, 2)
-          invalid("codec for #{entry.mount} must be opus") unless entry.codec == "opus"
           invalid("#{entry.mount} is the target of more than one stream") if targets.has_key?(entry.mount)
           targets[entry.mount] = entry
         end

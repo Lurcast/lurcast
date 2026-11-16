@@ -3,7 +3,7 @@
 Third-party C code compiled into Lurcast by the transcode plugin (`src/plugins/transcode/`). The
 files are unmodified copies of the upstream files and keep their license headers. All of them are
 under permissive licenses, so they can be linked into the open-source and commercially licensed
-builds alike.
+builds alike. LAME (LGPL) is not vendored; see below.
 
 | File | Upstream | Version | License |
 |---|---|---|---|
@@ -21,9 +21,9 @@ Lurcast's own files here:
   its path. `src/plugins/transcode/native.cr` runs it while Crystal compiles, so `crystal build`
   and `crystal spec` need a C compiler (`$CC`, default `cc`) and `ar`; it only recompiles when a
   source, the compiler or the flags change.
-- `build-static-opus.sh` builds libopus 1.6.1 (BSD 3-clause, from
-  <https://downloads.xiph.org/releases/opus/>, checked against its SHA-256) as a static library for
-  the static Alpine build, which has no static libopus package.
+- `build-lame.sh` builds LAME 4.0 (LGPL 2 or later, encoder library only) as a shared library for
+  the release build, checked against its SHA-256. With `LURCAST_SOURCES` set, it also copies the
+  source tarball there, to attach to the release.
 
-libopus itself is not vendored: it is linked from the system (`pkg-config opus`; Homebrew
-`opus`, Debian and Ubuntu `libopus-dev`).
+libopus and LAME are not vendored: they are linked from the system (`pkg-config opus` and `lame`;
+Homebrew `opus lame`, Debian and Ubuntu `libopus-dev libmp3lame-dev`).

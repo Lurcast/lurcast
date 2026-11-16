@@ -1,59 +1,58 @@
 require "./native"
 
 class Lurcast::Plugins::Transcode < Lurcast::Plugin
-  # Mixes decoded audio to the configured channel count, resamples it to 48 kHz and encodes 20 ms
-  # Opus packets. One encoder lives as long as its transcoder, so the output stays one continuous
-  # Opus stream when the input's format, sample rate or channel count changes.
-  class OpusEncoder
-    RATE       = 48_000
-    FRAME_SIZE =    960 # 20 ms
-    MAX_PACKET =   4000
-    QUALITY    =      5 # SPEEX_RESAMPLER_QUALITY_DESKTOP
+  # Mixes decoded audio to the configured channel count, resamples it to the codec's rate, and
+  # encodes it a frame at a time. One encoder lives as long as its transcoder, so the output stays
+  # one continuous stream when the input's format, sample rate or channel count changes.
+  abstract class Encoder
+    QUALITY = 5 # SPEEX_RESAMPLER_QUALITY_DESKTOP
 
     getter channels : Int32
-    getter pre_skip : Int32
+    # The sample rate the codec is fed.
+    getter rate : Int32
 
-    @encoder : LibOpus::Encoder
     @resampler : LibLurcastExt::Resampler?
     @resampler_rate = 0
     @frame : Slice(Float32)
     @filled = 0
     @mixed = Slice(Float32).new(0)
     @resampled = Slice(Float32).new(0)
-    @packet = Bytes.new(MAX_PACKET)
     @closed = false
 
-    def initialize(bitrate_kbps : Int32, @channels : Int32)
-      error = 0
-      @encoder = LibOpus.encoder_create(RATE, @channels, LibOpus::APPLICATION_AUDIO, pointerof(error))
-      raise ArgumentError.new("Opus encoder: #{String.new(LibOpus.strerror(error))}") unless error == LibOpus::OK
-      LibOpus.encoder_ctl(@encoder, LibOpus::SET_BITRATE_REQUEST, bitrate_kbps * 1000)
-      lookahead = 0
-      LibOpus.encoder_ctl(@encoder, LibOpus::GET_LOOKAHEAD, pointerof(lookahead))
-      @pre_skip = lookahead
-      @frame = Slice(Float32).new(FRAME_SIZE * @channels)
+    # An encoder for *codec* ("opus" or "mp3").
+    def self.for(codec : String, bitrate_kbps : Int32, channels : Int32) : Encoder
+      codec == "mp3" ? MP3Encoder.new(bitrate_kbps, channels) : OpusEncoder.new(bitrate_kbps, channels)
     end
 
-    def bitrate : Int32
-      value = 0
-      LibOpus.encoder_ctl(@encoder, LibOpus::GET_BITRATE_REQUEST, pointerof(value))
-      value
+    def initialize(@channels : Int32, @rate : Int32, frame_size : Int32)
+      @frame = Slice(Float32).new(frame_size * @channels)
     end
+
+    # The media type of the stream `writer` writes.
+    abstract def content_type : String
+
+    # Writes this codec's packets to *io* as a stream.
+    abstract def writer(io : IO) : StreamWriter
+
+    # Encodes one full frame (interleaved, `channels` channels at `rate`) and yields its packets.
+    private abstract def encode_frame(frame : Slice(Float32), & : Bytes ->) : Nil
+
+    private abstract def close_codec : Nil
 
     # Encodes *pcm* (interleaved, *channels* channels at *rate* Hz) and yields each finished packet.
     # Leftover samples wait for the next call. Packets are only valid until the block returns.
     def encode(pcm : Slice(Float32), channels : Int32, rate : Int32, & : Bytes ->) : Nil
-      raise IO::Error.new("Opus encoder is closed") if @closed
+      raise IO::Error.new("encoder is closed") if @closed
       return if pcm.empty? || channels <= 0 || rate <= 0
       mixed = mix(pcm, channels)
-      mixed = resample(mixed, rate) unless rate == RATE
+      mixed = resample(mixed, rate) unless rate == @rate
       push(mixed) { |packet| yield packet }
     end
 
     def close : Nil
       return if @closed
       @closed = true
-      LibOpus.encoder_destroy(@encoder)
+      close_codec
       @resampler.try { |resampler| LibLurcastExt.resampler_destroy(resampler) }
       @resampler = nil
     end
@@ -72,9 +71,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
         offset += count
         next unless @filled == @frame.size
         @filled = 0
-        size = LibOpus.encode_float(@encoder, @frame.to_unsafe, FRAME_SIZE, @packet.to_unsafe, MAX_PACKET)
-        raise IO::Error.new("Opus encoding failed: #{String.new(LibOpus.strerror(size))}") if size < 0
-        yield @packet[0, size]
+        encode_frame(@frame) { |packet| yield packet }
       end
     end
 
@@ -87,7 +84,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
         frames.times { |index| mixed[index * 2] = mixed[index * 2 + 1] = pcm[index] }
         return mixed
       end
-      gains = OpusEncoder.stereo_gains(channels)
+      gains = Encoder.stereo_gains(channels)
       frames.times do |index|
         left = right = 0.0_f32
         channels.times do |channel|
@@ -128,7 +125,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
     private def resample(pcm : Slice(Float32), rate : Int32) : Slice(Float32)
       resampler = resampler_for(rate)
       input_frames = pcm.size // @channels
-      capacity = (input_frames.to_i64 * RATE // rate + 64).to_i
+      capacity = (input_frames.to_i64 * @rate // rate + 64).to_i
       @resampled = Slice(Float32).new(capacity * @channels) if @resampled.size < capacity * @channels
       consumed = 0
       produced = 0
@@ -151,7 +148,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
       end
       @resampler.try { |old| LibLurcastExt.resampler_destroy(old) }
       error = 0
-      resampler = LibLurcastExt.resampler_init(@channels.to_u32, rate.to_u32, RATE.to_u32, QUALITY, pointerof(error))
+      resampler = LibLurcastExt.resampler_init(@channels.to_u32, rate.to_u32, @rate.to_u32, QUALITY, pointerof(error))
       raise UnsupportedInput.new("audio at #{rate} Hz the resampler rejects") if resampler.null? || error != 0
       @resampler = resampler
       @resampler_rate = rate
@@ -159,9 +156,135 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
     end
   end
 
+  # 20 ms Opus packets at 48 kHz, written as Ogg Opus.
+  class OpusEncoder < Encoder
+    RATE       = 48_000
+    FRAME_SIZE =    960 # 20 ms
+    MAX_PACKET =   4000
+
+    getter pre_skip : Int32
+
+    @encoder : LibOpus::Encoder
+    @packet = Bytes.new(MAX_PACKET)
+
+    def initialize(bitrate_kbps : Int32, channels : Int32)
+      super(channels, RATE, FRAME_SIZE)
+      error = 0
+      @encoder = LibOpus.encoder_create(RATE, channels, LibOpus::APPLICATION_AUDIO, pointerof(error))
+      raise ArgumentError.new("Opus encoder: #{String.new(LibOpus.strerror(error))}") unless error == LibOpus::OK
+      LibOpus.encoder_ctl(@encoder, LibOpus::SET_BITRATE_REQUEST, bitrate_kbps * 1000)
+      lookahead = 0
+      LibOpus.encoder_ctl(@encoder, LibOpus::GET_LOOKAHEAD, pointerof(lookahead))
+      @pre_skip = lookahead
+    end
+
+    def bitrate : Int32
+      value = 0
+      LibOpus.encoder_ctl(@encoder, LibOpus::GET_BITRATE_REQUEST, pointerof(value))
+      value
+    end
+
+    def content_type : String
+      "audio/ogg"
+    end
+
+    def writer(io : IO) : StreamWriter
+      OggOpusWriter.new(io, channels, pre_skip)
+    end
+
+    private def encode_frame(frame : Slice(Float32), & : Bytes ->) : Nil
+      size = LibOpus.encode_float(@encoder, frame.to_unsafe, FRAME_SIZE, @packet.to_unsafe, MAX_PACKET)
+      raise IO::Error.new("Opus encoding failed: #{String.new(LibOpus.strerror(size))}") if size < 0
+      yield @packet[0, size]
+    end
+
+    private def close_codec : Nil
+      LibOpus.encoder_destroy(@encoder)
+    end
+  end
+
+  # Constant bit rate MP3 with LAME, fed 44.1 kHz audio. From 96 kbps up the MP3 is 44.1 kHz too;
+  # below that LAME picks a lower rate that suits the bit rate.
+  class MP3Encoder < Encoder
+    RATE       = 44_100
+    FRAME_SIZE =   1152
+    BITRATES   = {8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 192, 224, 256, 320}
+
+    @lame : LibLame::Flags
+    @left = Slice(Float32).new(FRAME_SIZE)
+    @right = Slice(Float32).new(FRAME_SIZE)
+    # LAME's worst case: 1.25 × samples + 7200 bytes.
+    @output = Bytes.new(FRAME_SIZE * 5 // 4 + 7200)
+
+    def initialize(bitrate_kbps : Int32, channels : Int32)
+      super(channels, RATE, FRAME_SIZE)
+      @lame = LibLame.init
+      raise ArgumentError.new("LAME could not start") if @lame.null?
+      LibLame.set_in_samplerate(@lame, RATE)
+      LibLame.set_out_samplerate(@lame, RATE) if bitrate_kbps >= 96
+      LibLame.set_num_channels(@lame, channels)
+      LibLame.set_mode(@lame, channels == 1 ? LibLame::MONO : LibLame::JOINT_STEREO)
+      LibLame.set_brate(@lame, bitrate_kbps)
+      # No Xing/LAME header frame: a stream has no end to describe.
+      LibLame.set_write_vbr_tag(@lame, 0)
+      unless LibLame.init_params(@lame) >= 0
+        LibLame.close(@lame)
+        raise ArgumentError.new("LAME rejects #{bitrate_kbps} kbps with #{channels} channels")
+      end
+    end
+
+    def content_type : String
+      "audio/mpeg"
+    end
+
+    def writer(io : IO) : StreamWriter
+      RawWriter.new(io)
+    end
+
+    # The sample rate of the MP3 frames.
+    def output_rate : Int32
+      LibLame.get_out_samplerate(@lame)
+    end
+
+    private def encode_frame(frame : Slice(Float32), & : Bytes ->) : Nil
+      FRAME_SIZE.times do |index|
+        @left[index] = frame[index * channels]
+        @right[index] = frame[index * channels + channels - 1]
+      end
+      size = LibLame.encode_buffer_ieee_float(@lame, @left.to_unsafe, @right.to_unsafe, FRAME_SIZE, @output.to_unsafe, @output.size)
+      raise IO::Error.new("MP3 encoding failed (LAME error #{size})") if size < 0
+      yield @output[0, size] if size.positive?
+    end
+
+    private def close_codec : Nil
+      LibLame.close(@lame)
+    end
+  end
+
+  # Writes encoded packets to the target mount's pipe.
+  abstract class StreamWriter
+    abstract def write(packet : Bytes) : Nil
+    abstract def flush : Nil
+  end
+
+  # MP3 frames need no container: they are written as they are.
+  class RawWriter < StreamWriter
+    def initialize(@io : IO)
+    end
+
+    def write(packet : Bytes) : Nil
+      @io.write(packet)
+      @io.flush
+    end
+
+    def flush : Nil
+      @io.flush
+    end
+  end
+
   # Writes Opus packets as an Ogg Opus stream (RFC 7845): an OpusHead page, an OpusTags page, then
   # audio pages of up to `PACKETS_PER_PAGE` packets with their granule positions.
-  class OggOpusWriter
+  class OggOpusWriter < StreamWriter
     PACKETS_PER_PAGE = 10 # 200 ms per page
     CRC_TABLE        = Array(UInt32).new(256) do |index|
       crc = index.to_u32 << 24

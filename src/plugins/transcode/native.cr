@@ -1,6 +1,6 @@
-# Bindings for the audio libraries the transcode plugin uses: libopus (system library) and the
-# vendored decoders and resampler in `ext/`, which `ext/build.sh` compiles into a static archive
-# while Crystal compiles this file.
+# Bindings for the audio libraries the transcode plugin uses: libopus and LAME (MP3 encoding) from
+# the system, and the vendored decoders and resampler in `ext/`, which `ext/build.sh` compiles into
+# a static archive while Crystal compiles this file.
 
 @[Link("opus", pkg_config: "opus")]
 lib LibOpus
@@ -78,3 +78,25 @@ end
     fun resampler_destroy = lurcast_resampler_destroy(resampler : Resampler) : Void
   end
 {% end %}
+
+# LAME, the MP3 encoder (LGPL 2 or later).
+@[Link("mp3lame", pkg_config: "lame")]
+lib LibLame
+  MONO         = 3
+  JOINT_STEREO = 1
+
+  type Flags = Void*
+
+  fun init = lame_init : Flags
+  fun set_in_samplerate = lame_set_in_samplerate(flags : Flags, rate : Int32) : Int32
+  fun set_out_samplerate = lame_set_out_samplerate(flags : Flags, rate : Int32) : Int32
+  fun set_num_channels = lame_set_num_channels(flags : Flags, channels : Int32) : Int32
+  fun set_brate = lame_set_brate(flags : Flags, kbps : Int32) : Int32
+  fun set_mode = lame_set_mode(flags : Flags, mode : Int32) : Int32
+  fun set_write_vbr_tag = lame_set_bWriteVbrTag(flags : Flags, write : Int32) : Int32
+  fun init_params = lame_init_params(flags : Flags) : Int32
+  fun get_out_samplerate = lame_get_out_samplerate(flags : Flags) : Int32
+  fun encode_buffer_ieee_float = lame_encode_buffer_ieee_float(flags : Flags, left : Float32*, right : Float32*, samples : Int32, output : UInt8*, size : Int32) : Int32
+  fun close = lame_close(flags : Flags) : Int32
+  fun get_lame_version : UInt8*
+end

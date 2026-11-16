@@ -1,7 +1,8 @@
 name: Release
 
-# Push a tag like v0.1.0. Builds static Linux binaries for x86-64 and ARM64, publishes them on a
-# GitHub release, and pushes a multi-arch image to ghcr.io/lurcast/lurcast built from those binaries.
+# Push a tag like v0.1.0. Builds Lurcast for x86-64 and ARM64 Linux as tarballs (the binary with its
+# shared libraries and musl's loader, which run on any Linux), publishes them on a GitHub release with
+# the source of the LGPL library they include (LAME), and pushes a multi-arch image built from them.
 on:
   push:
     tags: ["v*"]
@@ -22,22 +23,26 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
-      # The static build runs in the Alpine image with `docker run`, not as a job container,
+      # The build runs in the Alpine image with `docker run`, not as a job container,
       # because GitHub's JavaScript actions cannot run in Alpine containers on ARM64 runners.
-      - name: Build static binary
+      - name: Build the bundle
         run: |
-          docker run --rm -v "$PWD:/src" -w /src crystallang/crystal:1.21.1-alpine sh -euc '
-            apk add --no-cache libogg-dev libogg-static
-            # Alpine has no static libopus package; build it from the release tarball.
-            sh ext/build-static-opus.sh
+          docker run --rm -v "$PWD:/src" -w /src -e LURCAST_SOURCES=/src/sources crystallang/crystal:1.21.1-alpine sh -euc '
+            apk add --no-cache libogg-dev opus-dev xz
+            # LAME, as a shared library from its pinned release tarball.
+            sh ext/build-lame.sh
             shards install --production
-            shards build lurcast --production --release --static --no-debug
-            chown -R "$(stat -c %u:%g /src)" bin lib
+            shards build lurcast --production --release --no-debug --link-flags=-static-libgcc
+            sh deploy/bundle.sh bin/lurcast dist/lurcast
+            chown -R "$(stat -c %u:%g /src)" bin lib dist sources
           '
-          mkdir -p dist
-          cp bin/lurcast dist/lurcast-linux-${{ matrix.arch }}
-          ./dist/lurcast-linux-${{ matrix.arch }} --version
-          cd dist && sha256sum lurcast-linux-${{ matrix.arch }} > lurcast-linux-${{ matrix.arch }}.sha256
+          # The runner is Ubuntu (glibc): this checks the bundle runs outside Alpine.
+          ./dist/lurcast/lurcast --version
+          cd dist
+          tar czf lurcast-linux-${{ matrix.arch }}.tar.gz lurcast
+          sha256sum lurcast-linux-${{ matrix.arch }}.tar.gz > lurcast-linux-${{ matrix.arch }}.tar.gz.sha256
+          rm -rf lurcast
+          mv ../sources/* .
       - uses: actions/upload-artifact@v7
         with:
           name: lurcast-linux-${{ matrix.arch }}

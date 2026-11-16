@@ -41,8 +41,8 @@ project keep offering both editions.
 
 ## Third-party code
 
-The binary includes code from other projects, all under permissive licenses that allow both the
-AGPL and the commercial licenses above:
+The binary includes code from other projects. Most of it is under permissive licenses that allow both
+the AGPL and the commercial licenses above:
 
 | Component | Used for | License |
 |---|---|---|
@@ -50,9 +50,28 @@ AGPL and the commercial licenses above:
 | [libogg](https://xiph.org/ogg/) | Ogg page parsing | BSD 3-clause |
 | [minimp3](https://github.com/lieff/minimp3) (vendored in `ext/`) | MP3 decoding (transcode plugin) | CC0 1.0 |
 | [stb_vorbis](https://github.com/nothings/stb) (vendored in `ext/`) | Vorbis decoding (transcode plugin) | MIT or public domain |
-| [SpeexDSP resampler](https://github.com/xiph/speexdsp) (vendored in `ext/`) | Resampling to 48 kHz (transcode plugin) | BSD 3-clause |
+| [SpeexDSP resampler](https://github.com/xiph/speexdsp) (vendored in `ext/`) | Resampling (transcode plugin) | BSD 3-clause |
+
+One is under the GNU Library General Public License, for MP3 in the transcode plugin:
+
+| Component | Used for | License |
+|---|---|---|
+| [LAME](https://lame.sourceforge.io/) 4.0 | MP3 encoding | LGPL 2 or later |
+
+Releases include it as a separate shared library, `lib/libmp3lame.so.0` next to the Lurcast binary
+(`/opt/lurcast/lib` in the Docker image), built by `ext/build-lame.sh` from the release tarball
+attached to each release. Lurcast loads it when it starts, so anyone can replace it with a modified
+build, which is what the LGPL asks for. A replacement must be built for musl (for example on Alpine
+Linux, as that script does), because Lurcast runs with musl's loader. This holds for every edition:
+
+- The open-source edition is AGPL, and its complete source is published.
+- A binary under a commercial license (the Hosting edition, or a commercial license for the core)
+  ships the same replaceable library. Its license terms must allow customers to modify it and to
+  reverse engineer as far as needed to debug such modifications (LGPL 2 section 6).
+
+MP3 patents have expired.
 
 See [ext/README.md](ext/README.md) for the vendored versions. BSD-licensed components require their
 copyright notices in binary distributions: [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) has the license of
-every part of the static binary (also OpenSSL, musl, the Crystal standard library, and others), and
-ships with each release and in the Docker image at `/usr/share/licenses/lurcast/`.
+every part of a release (also OpenSSL, musl, the Crystal standard library, and others), and ships
+in each release tarball and in the Docker image at `/usr/share/licenses/lurcast/`.
