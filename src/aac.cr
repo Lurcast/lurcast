@@ -59,6 +59,33 @@ module AAC
     Frame.new(4, 0, 0, 0, payload_size + LOAS_HEADER_SIZE, 1024, Transport::LOAS)
   end
 
+  # An AudioSpecificConfig for *object_type* (2 for AAC LC), with explicit SBR signalling
+  # (HE-AAC) when *sbr_rate_index* is given.
+  def self.audio_specific_config(object_type : Int32, rate_index : Int32, channels : Int32, *, sbr_rate_index : Int32? = nil) : Bytes
+    fields = [{object_type, 5}, {rate_index, 4}, {channels, 4}]
+    fields.push({sbr_rate_index, 4}, {2, 5}) if sbr_rate_index
+    fields << {0, 3} # GASpecificConfig: 1024 samples, no core coder, no extension
+    total = fields.sum(&.[1])
+    value = fields.reduce(0_u64) { |acc, (field, width)| (acc << width) | (field.to_u64 & ((1_u64 << width) - 1)) }
+    size = (total + 7) // 8
+    value <<= size * 8 - total
+    Bytes.new(size) { |index| (value >> ((size - 1 - index) * 8)).to_u8! }
+  end
+
+  # A 7-byte ADTS header (no CRC) for a raw AAC frame of *payload_size* bytes.
+  def self.adts_header(object_type : Int32, rate_index : Int32, channels : Int32, payload_size : Int32) : Bytes
+    length = payload_size + 7
+    header = Bytes.new(7)
+    header[0] = 0xff_u8
+    header[1] = 0xf1_u8
+    header[2] = ((((object_type - 1) & 0x03) << 6) | ((rate_index & 0x0f) << 2) | ((channels >> 2) & 0x01)).to_u8
+    header[3] = (((channels & 0x03) << 6) | ((length >> 11) & 0x03)).to_u8
+    header[4] = ((length >> 3) & 0xff).to_u8
+    header[5] = (((length & 0x07) << 5) | 0x1f).to_u8
+    header[6] = 0xfc_u8
+    header
+  end
+
   def self.find_frame(data : Bytes, require_complete = false) : LocatedFrame?
     return if data.size < LOAS_HEADER_SIZE
 

@@ -29,6 +29,11 @@ class Lurcast::Plugins::SpecEcho < Lurcast::Plugin
     context.text(context.path)
   end
 
+  @[Route("GET", "/spec-listen", listener: true)]
+  private def listen(context : Context) : Nil
+    context.text("listening")
+  end
+
   @[Route("GET", "/spec-echo-param")]
   @[Route("POST", "/spec-echo-param")]
   private def echo_param(context : Context) : Nil
@@ -104,6 +109,26 @@ describe Lurcast::Plugin do
     %w[hls cover_art listener_logins].each { |name| script.should contain("register(\"#{name}\",") }
     page = Templates.admin
     page.index!("/_lurcast/plugins.js").should be < page.index!("/_lurcast/admin.js")
+  end
+
+  it "doesn't count listener routes against the rate limit" do
+    listener = TCPServer.new("127.0.0.1", 0)
+    port = listener.local_address.as(Socket::IPAddress).port
+    config = echo_config
+    config.rate_limit = 3
+    server = IcecastServer.new(config)
+    spawn server.serve(listener)
+    Fiber.yield
+
+    10.times { request(port, "GET /spec-listen")[1].should eq("listening") }
+    3.times { request(port, "GET /spec-echo")[0].should start_with("HTTP/1.0 200") }
+    # Refused before the request is read, so read the answer without sending one.
+    rejected = TCPSocket.new("127.0.0.1", port)
+    rejected.read_timeout = 2.seconds
+    read_head(rejected).should start_with("HTTP/1.0 429")
+  ensure
+    rejected.try(&.close)
+    server.try(&.stop)
   end
 
   it "routes requests to the methods marked with @[Route]" do

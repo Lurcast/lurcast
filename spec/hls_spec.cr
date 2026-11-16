@@ -1,5 +1,4 @@
-require "spec"
-require "../src/plugins/hls/segmenter"
+require "./spec_helper"
 
 private PREFIX = "/_lurcast/hls/live/"
 
@@ -192,5 +191,170 @@ describe HLS::Segmenter do
 
     segmenter.write(mp3_frames(39))
     segmenter.playlist(PREFIX).should_not be_nil
+  end
+end
+
+private HLS_FIXTURES = "#{__DIR__}/fixtures"
+
+# Feeds a fixture to a segmenter in chunks of whole frames or arbitrary bytes, as the mount would.
+private def segment_file(segmenter : HLS::Segmenter, path : String, chunk = 1000) : Nil
+  bytes = File.read("#{HLS_FIXTURES}/#{path}").to_slice
+  offset = 0
+  while offset < bytes.size
+    size = Math.min(chunk, bytes.size - offset)
+    segmenter.write(bytes[offset, size])
+    offset += size
+  end
+end
+
+private def mount_frames(path : String, content_type : String) : Bytes
+  mount = MountPoint.new("/hls", 1 << 20, 1 << 21)
+  mount.apply_headers(HTTP::Headers{"Content-Type" => content_type})
+  output = IO::Memory.new
+  tap = SpecCollectTap.new(output)
+  mount.add_tap(tap)
+  bytes = File.read("#{HLS_FIXTURES}/#{path}").to_slice
+  bytes.each_slice(997) { |slice| mount.publish(Bytes.new(slice.to_unsafe, slice.size)) }
+  output.to_slice
+end
+
+# Feeds a fixture through a mount to *segmenter*, as the HLS plugin's tap does: the segmenter gets
+# the mount's own (reused) buffer.
+private def segment_through_mount(segmenter : HLS::Segmenter, path : String, content_type : String) : Nil
+  mount = MountPoint.new("/hls", 1 << 16, 1 << 17)
+  mount.apply_headers(HTTP::Headers{"Content-Type" => content_type})
+  mount.add_tap(SpecSegmenterTap.new(segmenter))
+  File.read("#{HLS_FIXTURES}/#{path}").to_slice.each_slice(997) { |slice| mount.publish(Bytes.new(slice.to_unsafe, slice.size)) }
+end
+
+private class SpecSegmenterTap < AudioTap
+  def initialize(@segmenter : HLS::Segmenter)
+  end
+
+  def receive(data : Bytes) : Nil
+    @segmenter.write(data)
+  end
+end
+
+private class SpecCollectTap < AudioTap
+  def initialize(@io : IO)
+  end
+
+  def receive(data : Bytes) : Nil
+    @io.write(data)
+  end
+end
+
+# Joins the playlist's init segment and segments into one file and decodes it with ffmpeg; returns
+# the decoded duration in seconds.
+private def decode_playlist(segmenter : HLS::Segmenter) : Float64
+  playlist = playlist!(segmenter)
+  file = IO::Memory.new
+  playlist.each_line do |line|
+    if map = line.match(/^#EXT-X-MAP:URI=".*init-(\d+)\.mp4"/)
+      file.write(segmenter.init(map[1].to_i) || raise "missing init")
+    elsif line.starts_with?(PREFIX)
+      file.write(segment!(segmenter, line.lchop(PREFIX).split('.').first.to_i64))
+    end
+  end
+  path = File.tempname("hls", segmenter.container.fmp4? ? ".mp4" : ".#{segmenter.extension}")
+  File.write(path, file.to_slice)
+  errors = IO::Memory.new
+  output = IO::Memory.new
+  Process.run("ffmpeg", ["-v", "error", "-i", path, "-f", "null", "-"], error: errors).success?.should be_true
+  errors.to_s.should eq("")
+  Process.run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path], output: output)
+  output.to_s.strip.to_f
+ensure
+  File.delete(path) if path && File.exists?(path)
+end
+
+describe "HLS framers" do
+  it "rewrites LATM as ADTS for packed audio" do
+    segmenter = HLS::Segmenter.new(HLS::AACFramer.new, HLS::Container::Packed, 1.0, 10, first_sequence: 0_i64)
+    segmenter.write(mount_frames("hls/tone.latm", "audio/aac"))
+    segmenter.codecs.should eq("mp4a.40.2")
+    data = segment!(segmenter, 0_i64)
+    tag_size = 10 + syncsafe(data, 6)
+    AAC.parse_header(data[tag_size..]).try(&.transport).should eq(AAC::Transport::ADTS)
+    decode_playlist(segmenter).should be_close(3.0, 0.2)
+  end
+
+  it "puts AAC in fMP4" do
+    segmenter = HLS::Segmenter.new(HLS::AACFramer.new, HLS::Container::FMP4, 1.0, 10, first_sequence: 0_i64)
+    segment_through_mount(segmenter, "hls/tone.aac", "audio/aac")
+    playlist!(segmenter).should contain("#EXT-X-MAP:URI=\"#{PREFIX}init-1.mp4\"\n")
+    playlist!(segmenter).should contain("#{PREFIX}0.m4s\n")
+    decode_playlist(segmenter).should be_close(3.0, 0.2)
+  end
+
+  it "puts Ogg Opus in fMP4" do
+    segmenter = HLS::Segmenter.new(HLS::OggFramer.new, HLS::Container::FMP4, 1.0, 10, first_sequence: 0_i64)
+    segment_file(segmenter, "hls/tone.opus")
+    segmenter.codecs.should eq("opus")
+    # 20 ms packets: the last segment ends exactly at 4 s.
+    decode_playlist(segmenter).should be_close(4.0, 0.05)
+  end
+
+  it "puts Ogg FLAC and native FLAC in fMP4" do
+    {HLS::OggFramer.new => "join/tone.oga", HLS::FLACFramer.new => "join/tone.flac"}.each do |framer, file|
+      segmenter = HLS::Segmenter.new(framer, HLS::Container::FMP4, 1.0, 10, first_sequence: 0_i64)
+      segment_file(segmenter, file)
+      segmenter.codecs.should eq("fLaC")
+      decode_playlist(segmenter).should be_close(2.0, 0.2)
+    end
+  end
+
+  it "reads FLAC as the mount publishes it" do
+    segmenter = HLS::Segmenter.new(HLS::FLACFramer.new, HLS::Container::FMP4, 1.0, 10, first_sequence: 0_i64)
+    segmenter.write(mount_frames("join/tone.flac", "audio/flac"))
+    decode_playlist(segmenter).should be_close(2.0, 0.2)
+  end
+
+  it "says why Ogg Vorbis can't be served" do
+    segmenter = HLS::Segmenter.new(HLS::OggFramer.new, HLS::Container::FMP4, 1.0, 10, first_sequence: 0_i64)
+    segment_file(segmenter, "transcode/tone.ogg")
+    segmenter.unsupported.should eq("Ogg Vorbis can't be served over HLS")
+    segmenter.playlist(PREFIX).should be_nil
+  end
+end
+
+describe "Low-latency HLS" do
+  it "publishes partial segments that make up each segment" do
+    segmenter = HLS::Segmenter.new(HLS::AACFramer.new, HLS::Container::FMP4, 2.0, 10, part_seconds: 0.5, first_sequence: 0_i64)
+    segmenter.write(mount_frames("hls/tone.aac", "audio/aac"))
+    playlist = playlist!(segmenter)
+    playlist.should contain("#EXT-X-PART-INF:PART-TARGET=0.500\n")
+    playlist.should contain("#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.500\n")
+    playlist.should match(/#EXT-X-PRELOAD-HINT:TYPE=PART,URI="#{PREFIX}\d+\.\d+\.m4s"\n\z/)
+    # Segments end on part boundaries: 4 parts of 21 frames (84 × 1024 / 44100 s).
+    playlist.should contain("#EXTINF:1.950,\n")
+    parts = playlist.lines.select(&.starts_with?("#EXT-X-PART:"))
+    parts.should_not be_empty
+    parts.each do |line|
+      line.match(/DURATION=([\d.]+)/).try(&.[1].to_f).should_not be_nil
+      (line.match(/DURATION=([\d.]+)/).try(&.[1].to_f) || 1.0).should be <= 0.5
+    end
+
+    joined = IO::Memory.new
+    index = 0
+    while part = segmenter.part(0_i64, index)
+      joined.write(part)
+      index += 1
+    end
+    joined.to_slice.should eq(segment!(segmenter, 0_i64))
+    decode_playlist(segmenter).should be_close(3.9, 0.1)
+  end
+
+  it "blocks a playlist reload until the part exists" do
+    segmenter = HLS::Segmenter.new(HLS::AACFramer.new, HLS::Container::FMP4, 2.0, 10, part_seconds: 0.5, first_sequence: 0_i64)
+    bytes = mount_frames("hls/tone.aac", "audio/aac")
+    segmenter.wait_for(0_i64, 0, 50.milliseconds).should be_false
+    done = Channel(Bool).new
+    spawn { done.send(segmenter.wait_for(0_i64, 1, 2.seconds)) }
+    Fiber.yield
+    segmenter.write(bytes)
+    receive(done).should be_true
+    segmenter.wait_for(0_i64).should be_true
   end
 end

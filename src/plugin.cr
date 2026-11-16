@@ -44,6 +44,8 @@ module Lurcast
     # - `prefix: true` matches every path that starts with the given one, and `suffix: true` every
     #   path that ends with it.
     # - `admin: true` asks for an admin login first and puts it in `Context#access`.
+    # - `listener: true` marks requests listeners' players make all the time, such as HLS playlists
+    #   and segments: they don't count against the per-address `rate_limit`.
     annotation Route
     end
 
@@ -162,6 +164,7 @@ module Lurcast
           \{% for route in method.annotations(::Lurcast::Plugin::Route) %}
             \{% raise "#{@type}##{method.name}: @[Route] needs a method and a path" unless route[0] && route[1] %}
             if method == \{{ route[0] }} && \{% if route[:prefix] %} path.starts_with?(\{{ route[1] }}) \{% elsif route[:suffix] %} path.ends_with?(\{{ route[1] }}) \{% else %} path == \{{ route[1] }} \{% end %}
+              \{% if route[:listener] == true %} server.listener_request(address) \{% end %}
               context = ::Lurcast::Plugin::Context.new(server, client, request, address)
               context.run(admin: \{{ route[:admin] == true }}) { \{{ method.name.id }}(context) }
               return true

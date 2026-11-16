@@ -37,7 +37,7 @@ See [LICENSING.md](LICENSING.md) for details.
 - SHOUTcast DNAS endpoints: `/7.html`, `/stats`, `/statistics`, `/currentsong`, song history at `/played` and `/played.html`, and `admin.cgi` modes `updinfo`, `viewxml`, `viewjson`, `kicksrc`, and `kickdst`
 - Per-mount source credentials, hidden mounts, and intro files
 - A public status page at `/` (also `/status.xsl`) with a player and live now-playing, and a web admin dashboard at `/admin/`
-- HLS output for MP3 and AAC mounts at `/<mount>.m3u8`, without transcoding
+- HLS output at `/<mount>.m3u8` for MP3, AAC (ADTS or LATM), Opus, and FLAC mounts, without transcoding, with optional low-latency HLS and multivariant playlists
 - Recording mounts to files, with optional hourly (or any length) splits
 - Webhooks for source, song, listener, recording, and reload events
 - An access log in the combined format, and reloading `config.yml` without a restart
@@ -196,11 +196,24 @@ plugins:
   hls:
     segment_seconds: 6
     window: 6              # segments in the playlist
-    mounts: [/live]        # only these mounts; every MP3 and AAC mount when left out
+    mounts: [/live]        # only these mounts; every mount HLS can serve when left out
     except: [/talk]        # never these
+    low_latency: false     # partial segments and blocking playlist reloads
+    part_seconds: 1.0      # with low_latency, 0.2 to 2
+    variants:              # multivariant playlists: /radio.m3u8 offers both mounts
+      /radio: [/live, /live-mobile]
 ```
 
-MP3 and AAC (ADTS) mounts get an HLS playlist at `/<mount>.m3u8` (for example `/live.m3u8`) for browsers and phones that prefer HLS. Lurcast cuts the audio into segments on frame boundaries without transcoding, as HLS packed audio with ID3 timestamps; segments also carry the song title. Ogg and LATM streams are not offered over HLS. HLS listeners are counted as addresses that fetched a segment recently, and count in the listener history. Listener logins and the ban list apply to the playlist and every segment, but listener limits don't. The `url_auth` plugin checks listeners one connection at a time, so HLS stays off while it is on.
+Mounts get an HLS playlist at `/<mount>.m3u8` (for example `/live.m3u8`) for browsers and phones that prefer HLS. Lurcast cuts the audio into segments on frame boundaries without transcoding:
+
+- MP3 and AAC become HLS packed audio, with ID3 timestamps and the song title. AAC in LATM (as DAB+ and DVB encoders send it) is rewritten as ADTS.
+- Opus and FLAC, in Ogg or as native FLAC, become fragmented MP4 (CMAF) segments. Ogg Vorbis has no MP4 form, so Vorbis mounts are not offered over HLS.
+
+With `low_latency: true`, AAC, Opus, and FLAC mounts use fragmented MP4 cut into parts of `part_seconds`, which players fetch as soon as each is ready, and players can wait for the next part instead of polling (blocking playlist reloads and preload hints). With 0.5-second parts, players stayed about 2 seconds behind live in testing, instead of three segments. MP3 keeps packed audio and normal latency.
+
+A variant list publishes a multivariant playlist at `/<name>.m3u8` that offers each listed mount that is on the air, with its measured bandwidth and codec, so players pick the one that suits their connection. Pair it with the transcode plugin to offer, say, AAC at 128 kbps and Opus at 32 kbps.
+
+HLS listeners are counted as addresses that fetched a segment recently, and count in the listener history. Playlist and segment requests don't count against `rate_limit`, because players make them all the time; `max_connections_per_ip` still applies, and a low-latency player holds two connections. Listener logins and the ban list apply to the playlist and every segment, but listener limits don't. The `url_auth` plugin checks listeners one connection at a time, so HLS stays off while it is on.
 
 ### Recording
 
@@ -398,7 +411,7 @@ module Lurcast::Plugins
 end
 ```
 
-Every section also takes `enabled: false`, and unknown settings are an error that names the plugin. `GET` routes answer `HEAD` too, `prefix: true` matches every path under the given one, `suffix: true` every path that ends with it, and `context.halt(404, "message")` ends a route with a JSON error. `reload(settings)` runs after a configuration reload, with nil when the section was removed. Each plugin logs as `lurcast.plugins.<name>` and keeps its files in `data_dir/<name>/`.
+Every section also takes `enabled: false`, and unknown settings are an error that names the plugin. `GET` routes answer `HEAD` too, `prefix: true` matches every path under the given one, `suffix: true` every path that ends with it, `listener: true` marks requests players make all the time (they don't count against `rate_limit`), and `context.halt(404, "message")` ends a route with a JSON error. `reload(settings)` runs after a configuration reload, with nil when the section was removed. Each plugin logs as `lurcast.plugins.<name>` and keeps its files in `data_dir/<name>/`.
 
 The core server knows no plugin by name: plugins work only through the hooks in `src/extension.cr`, which they override. Among them:
 

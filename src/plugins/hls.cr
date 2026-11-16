@@ -2,16 +2,22 @@ require "../plugin"
 require "./hls/segmenter"
 
 module Lurcast::Plugins
-  # HLS output for MP3 and AAC (ADTS) mounts, without transcoding: a playlist at `/<mount>.m3u8` and
-  # segments under `/_lurcast/hls/<mount>/`. Listener logins and the ban list apply to every request.
+  # HLS output without transcoding: a playlist at `/<mount>.m3u8` and segments under
+  # `/_lurcast/hls/<mount>/`. MP3 and AAC mounts get packed audio; AAC in LATM is rewritten as ADTS.
+  # Opus and FLAC (in Ogg, or native FLAC) get fragmented MP4. Listener logins and the ban list
+  # apply to every request.
   #
   # ```yaml
   # plugins:
   #   hls:
   #     segment_seconds: 6
-  #     window: 6          # segments in the playlist
-  #     mounts: [/live]    # only these mounts; every MP3 and AAC mount when left out
+  #     window: 6            # segments in the playlist
+  #     mounts: [/live]      # only these mounts; every mount it can serve when left out
   #     except: [/talk]
+  #     low_latency: false   # partial segments and blocking playlist reloads (AAC, Opus and FLAC)
+  #     part_seconds: 1.0
+  #     variants:            # multivariant playlists: /radio.m3u8 offers both mounts
+  #       /radio: [/live, /live-mobile]
   # ```
   class Hls < Plugin
     register "hls"
@@ -19,18 +25,30 @@ module Lurcast::Plugins
 
     SEGMENT_PATH = "#{WebAssets::PREFIX}/hls"
     PLAYLIST     = ".m3u8"
+    SEGMENT_FILE = /\A(\d+)(?:\.(\d+))?\.(mp3|aac|m4s)\z/
+    INIT_FILE    = /\Ainit-(\d+)\.mp4\z/
 
     class Settings < Plugin::Settings
       getter segment_seconds : Int32 = 6
       getter window : Int32 = 6
       getter mounts : Array(String)? = nil
       getter except : Array(String) = [] of String
+      getter? low_latency : Bool = false
+      getter part_seconds : Float64 = 1.0
+      getter variants : Hash(String, Array(String)) = {} of String => Array(String)
 
       def validate!(config : Config) : Nil
         invalid("segment_seconds must be between 1 and 30") unless 1 <= segment_seconds <= 30
         invalid("window must be between 3 and 30") unless 3 <= window <= 30
-        ((mounts || [] of String) + except).each do |mount|
+        if low_latency?
+          invalid("part_seconds must be between 0.2 and 2, and less than segment_seconds") unless 0.2 <= part_seconds <= 2.0 && part_seconds < segment_seconds
+        end
+        ((mounts || [] of String) + except + variants.keys + variants.values.flatten).each do |mount|
           invalid("mount names start with /: #{mount}") unless mount.starts_with?('/') && mount.size > 1
+        end
+        variants.each do |name, list|
+          invalid("variants #{name} lists no mounts") if list.empty?
+          invalid("variants #{name} lists itself") if list.includes?(name)
         end
       end
 
@@ -45,8 +63,7 @@ module Lurcast::Plugins
       getter point : MountPoint
       getter settings : Settings
 
-      def initialize(@point : MountPoint, codec : ::HLS::Codec, @settings : Settings)
-        @segmenter = ::HLS::Segmenter.new(codec, settings.segment_seconds.to_f, settings.window)
+      def initialize(@point : MountPoint, @segmenter : ::HLS::Segmenter, @settings : Settings)
       end
 
       def receive(data : Bytes) : Nil
@@ -107,26 +124,82 @@ module Lurcast::Plugins
       end
     end
 
-    @[Route("GET", PLAYLIST, suffix: true)]
+    @[Route("GET", PLAYLIST, suffix: true, listener: true)]
     private def playlist(context : Context) : Nil
-      mount = context.server.mount_name(context.path.rchop(PLAYLIST)) || context.halt(404, "Not found")
+      name = context.path.rchop(PLAYLIST)
+      variants = @mutex.synchronize { settings.variants[name]? }
+      return multivariant(context, variants) if variants
+      mount = context.server.mount_name(name) || context.halt(404, "Not found")
       return if context.server.listener_refused?(context.client, mount, context.headers, context.address, head: context.head?)
-      tap = tap(mount)
-      playlist = tap.try(&.segmenter.playlist("#{SEGMENT_PATH}#{mount}/"))
-      context.halt(404, tap ? "Stream is starting; try again in a few seconds" : "HLS is not available for this mount") unless playlist
+      tap = tap(mount) || context.halt(404, "HLS is not available for this mount")
+      segmenter = tap.segmenter
+      if reason = segmenter.unsupported
+        context.halt(404, "HLS is not available for this mount: #{reason}")
+      end
+      block_until_requested(context, segmenter)
+      playlist = segmenter.playlist("#{SEGMENT_PATH}#{mount}/") || context.halt(404, "Stream is starting; try again in a few seconds")
       context.bytes(playlist.to_slice, "application/vnd.apple.mpegurl", response_headers(context, "no-cache"))
     end
 
-    @[Route("GET", "#{SEGMENT_PATH}/", prefix: true)]
+    @[Route("GET", "#{SEGMENT_PATH}/", prefix: true, listener: true)]
     private def segment(context : Context) : Nil
       mount, _, file = context.path.lchop(SEGMENT_PATH).rpartition('/')
-      tap = tap(mount)
-      segment = tap.try { |found| file.split('.', 2).first.to_i64?.try { |sequence| found.segmenter.segment(sequence) } }
-      context.halt(404, "Segment not found") unless tap && segment
+      tap = tap(mount) || context.halt(404, "Segment not found")
+      segmenter = tap.segmenter
+      if match = INIT_FILE.match(file)
+        init = segmenter.init(match[1].to_i) || context.halt(404, "Segment not found")
+        return if context.server.listener_refused?(context.client, mount, context.headers, context.address, head: context.head?)
+        return context.bytes(init, "audio/mp4", response_headers(context, "public, max-age=3600"))
+      end
+      match = SEGMENT_FILE.match(file) || context.halt(404, "Segment not found")
+      context.halt(404, "Segment not found") unless match[3] == segmenter.extension
+      sequence = match[1].to_i64
+      data = if part = match[2]?.try(&.to_i)
+               # A preload hint names the next part before it exists: wait for it.
+               if sequence <= segmenter.next_sequence + 1
+                 segmenter.wait_for(sequence, part, (tap.settings.part_seconds * 3).seconds)
+               end
+               segmenter.part(sequence, part)
+             else
+               segmenter.segment(sequence)
+             end
+      context.halt(404, "Segment not found") unless data
       return if context.server.listener_refused?(context.client, mount, context.headers, context.address, head: context.head?)
       seen(mount, context.server.client_ip(context.headers, context.address))
       max_age = tap.settings.segment_seconds * tap.settings.window
-      context.bytes(segment, tap.segmenter.content_type, response_headers(context, "public, max-age=#{max_age}"))
+      context.bytes(data, segmenter.content_type, response_headers(context, "public, max-age=#{max_age}"))
+    end
+
+    # A blocking playlist reload (`_HLS_msn`, `_HLS_part`): waits until the playlist has that segment
+    # or part, at most three target durations.
+    private def block_until_requested(context : Context, segmenter : ::HLS::Segmenter) : Nil
+      return unless segmenter.low_latency?
+      msn = context.params["_HLS_msn"]?.try(&.to_i64?) || return
+      part = context.params["_HLS_part"]?.try(&.to_i?)
+      context.halt(400, "_HLS_msn is too far ahead") if msn > segmenter.next_sequence + 2
+      segmenter.wait_for(msn, part, (settings.segment_seconds * 3).seconds)
+    end
+
+    # A multivariant playlist offering each listed mount that is on the air with HLS.
+    private def multivariant(context : Context, mounts : Array(String)) : Nil
+      variants = mounts.compact_map do |mount|
+        segmenter = tap(mount).try(&.segmenter) || next
+        codecs = segmenter.codecs || next
+        point = context.server.get_mount(mount)
+        peak = segmenter.peak_bandwidth || (point.try(&.bitrate) || 128) * 1100
+        {mount, peak, segmenter.average_bandwidth, codecs}
+      end
+      context.halt(404, "None of these streams is on the air") if variants.empty?
+      playlist = String.build do |io|
+        io << "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n"
+        variants.each do |(mount, peak, average, codecs)|
+          io << "#EXT-X-STREAM-INF:BANDWIDTH=" << peak
+          io << ",AVERAGE-BANDWIDTH=" << average if average
+          io << ",CODECS=\"" << codecs << "\"\n"
+          io << mount << PLAYLIST << '\n'
+        end
+      end
+      context.bytes(playlist.to_slice, "application/vnd.apple.mpegurl", response_headers(context, "no-cache"))
     end
 
     private def response_headers(context : Context, cache_control : String) : HTTP::Headers
@@ -139,24 +212,36 @@ module Lurcast::Plugins
       @mutex.synchronize { @taps[mount]? }
     end
 
+    # The segmenter for *point*'s format, or nil when HLS can't serve it.
+    private def segmenter_for(point : MountPoint, settings : Settings) : ::HLS::Segmenter?
+      framer, fmp4 = case point.format
+                     when "mp3"  then {::HLS::MP3Framer.new, false}
+                     when "aac"  then {::HLS::AACFramer.new, settings.low_latency?}
+                     when "ogg"  then {::HLS::OggFramer.new, true}
+                     when "flac" then {::HLS::FLACFramer.new, true}
+                     else             return
+                     end
+      container = fmp4 ? ::HLS::Container::FMP4 : ::HLS::Container::Packed
+      part = settings.part_seconds if fmp4 && settings.low_latency?
+      ::HLS::Segmenter.new(framer, container, settings.segment_seconds.to_f, settings.window, part_seconds: part)
+    end
+
     # Starts or stops HLS for *point* to match the settings, and restarts it when they changed.
     private def sync(point : MountPoint) : Nil
       server = @server || return
       settings = @mutex.synchronize { @settings if @active }
-      codec = case point.format
-              when "mp3" then ::HLS::Codec::MP3
-              when "aac" then point.adts? ? ::HLS::Codec::AAC : nil
-              end
-      wanted = settings && codec && point.has_source? && !point.source_protocol.file? &&
+      wanted = settings && point.has_source? && !point.source_protocol.file? &&
                settings.serves?(point.mount) &&
                !server.each_listener_checked?(point.mount)
       current = tap(point.mount)
       return if current && wanted && current.point.same?(point) && current.settings.same?(settings)
       remove(point.mount) if current
-      return unless wanted && settings && codec
-      tap = Tap.new(point, codec, settings)
+      return unless wanted && settings
+      segmenter = segmenter_for(point, settings) || return
+      tap = Tap.new(point, segmenter, settings)
       added = @mutex.synchronize { @taps.has_key?(point.mount) ? nil : (@taps[point.mount] = tap) }
-      point.add_tap(tap) if added
+      # With the buffered audio first, so Ogg and FLAC streams start with their headers.
+      point.add_tap(tap, burst: true) if added
     end
 
     private def remove(mount : String) : Nil

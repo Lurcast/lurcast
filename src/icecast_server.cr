@@ -1025,6 +1025,12 @@ class IcecastServer
     @requests.reject! { |_ip, times| times.empty? || times.last < cutoff }
   end
 
+  # Takes a request back out of *ip*'s count for `rate_limit`: players fetch HLS playlists and
+  # segments all the time, which is listening, not a flood. `max_connections_per_ip` still applies.
+  def listener_request(ip : String) : Nil
+    @limits_mutex.synchronize { @requests[ip]?.try(&.pop?) }
+  end
+
   private def end_request(ip : String)
     @limits_mutex.synchronize { decrement(@connections, ip) }
   end
