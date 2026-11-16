@@ -13,8 +13,8 @@ jobs:
       - uses: crystal-lang/install-crystal@v1
         with:
           crystal: 1.21.1
-      - name: Install audio libraries, and ffmpeg for the specs
-        run: sudo apt-get update && sudo apt-get install -y libogg-dev libopus-dev libmp3lame-dev ffmpeg
+      - name: Install audio libraries (FDK for the AAC specs), and ffmpeg for the specs
+        run: sudo apt-get update && sudo apt-get install -y libogg-dev libopus-dev libmp3lame-dev libfdk-aac2 ffmpeg
       - run: shards install
       - name: Format
         run: crystal tool format --check src spec bench

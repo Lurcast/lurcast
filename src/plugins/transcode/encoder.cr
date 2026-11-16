@@ -19,9 +19,16 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
     @resampled = Slice(Float32).new(0)
     @closed = false
 
-    # An encoder for *codec* ("opus" or "mp3").
-    def self.for(codec : String, bitrate_kbps : Int32, channels : Int32) : Encoder
-      codec == "mp3" ? MP3Encoder.new(bitrate_kbps, channels) : OpusEncoder.new(bitrate_kbps, channels)
+    # An encoder for *codec* ("opus", "mp3", or "aac" with an AAC *profile*). AAC needs the FDK
+    # library; without it this raises `ArgumentError`.
+    def self.for(codec : String, bitrate_kbps : Int32, channels : Int32, profile = "lc") : Encoder
+      case codec
+      when "mp3" then MP3Encoder.new(bitrate_kbps, channels)
+      when "aac"
+        fdk = FDK.library || raise ArgumentError.new("AAC needs the Fraunhofer FDK AAC library: #{FDK.error}")
+        AACEncoder.new(bitrate_kbps, channels, profile, fdk)
+      else OpusEncoder.new(bitrate_kbps, channels)
+      end
     end
 
     def initialize(@channels : Int32, @rate : Int32, frame_size : Int32)
@@ -267,7 +274,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
     abstract def flush : Nil
   end
 
-  # MP3 frames need no container: they are written as they are.
+  # MP3 and ADTS frames need no container: they are written as they are.
   class RawWriter < StreamWriter
     def initialize(@io : IO)
     end

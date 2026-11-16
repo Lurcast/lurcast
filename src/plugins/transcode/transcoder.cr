@@ -1,5 +1,6 @@
 require "./decoders"
 require "./encoder"
+require "./fdk"
 
 class Lurcast::Plugins::Transcode < Lurcast::Plugin
   # A new source connection on the source mount, queued before its audio so the worker starts a
@@ -153,7 +154,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
       @mutex.synchronize { @details = point.station_details }
       format = point.format
       unless Decoder.supported?(format)
-        Log.warn { "Transcode can't read #{@entry.source}: #{format} streams can't be transcoded" }
+        Log.warn { "Transcode can't read #{@entry.source}: #{Decoder.unsupported_reason(format)}" }
         stop_worker
         return
       end
@@ -205,7 +206,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
     end
 
     private def work(queue : Channel(QueueItem), done : Channel(Nil)) : Nil
-      encoder = Encoder.for(@entry.codec, @entry.bitrate, @entry.channels)
+      encoder = Encoder.for(@entry.codec, @entry.bitrate, @entry.channels, @entry.profile)
       decoder = nil.as(Decoder?)
       retry_at = nil.as(Time::Instant?)
       title_applied = false
@@ -215,7 +216,7 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
           decoder.try(&.close)
           decoder = Decoder.for(item.format)
           unless decoder
-            Log.warn { "Transcode can't read #{item.mount}: #{item.format} streams can't be transcoded" }
+            Log.warn { "Transcode can't read #{item.mount}: #{Decoder.unsupported_reason(item.format)}" }
             close_output
           end
         in Bytes

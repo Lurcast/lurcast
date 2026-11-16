@@ -15,14 +15,20 @@ module Lurcast
         parser.on("-h", "--help", "Show help") { puts parser; exit }
       end
 
-      config = Config.load(config_path)
-      Log.setup(config.log_level)
-      unless (defaults = config.default_password_settings).empty?
-        Log.warn { "#{defaults.join(", ")} still use the default password; change them before exposing the server" }
-      end
-      Lurcast.configure_execution_context
+      begin
+        config = Config.load(config_path)
+        Log.setup(config.log_level)
+        unless (defaults = config.default_password_settings).empty?
+          Log.warn { "#{defaults.join(", ")} still use the default password; change them before exposing the server" }
+        end
+        Lurcast.configure_execution_context
 
-      server = IcecastServer.new(config)
+        server = IcecastServer.new(config)
+      rescue ex : ArgumentError
+        # A configuration error: the message says what to fix, so print it without a stack trace.
+        STDERR.puts "lurcast: #{ex.message}"
+        exit 1
+      end
       server.config_path = config_path
       setup.call(server, config)
       Process.on_terminate { server.stop }

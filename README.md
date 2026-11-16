@@ -43,7 +43,7 @@ See [LICENSING.md](LICENSING.md) for details.
 - An access log in the combined format, and reloading `config.yml` without a restart
 - Listener history charts (24 hours to 12 months) and a ban list for addresses, address ranges, and players
 - HTTP and `ICY 200 OK` listener responses for Icecast/Shoutcast-compatible players
-- Built-in plugins: automatic HTTPS with Let's Encrypt, transcoding to Opus or MP3, cover art (including SHOUTcast 2 album art), and listener logins from `htpasswd` files
+- Built-in plugins: automatic HTTPS with Let's Encrypt, transcoding to Opus, MP3, or (with the FDK AAC library installed) AAC, cover art (including SHOUTcast 2 album art), and listener logins from `htpasswd` files
 
 Lurcast relays encoded audio as the source sends it; the optional transcode plugin can also publish a copy of a mount in another codec or at another bit rate.
 
@@ -360,7 +360,7 @@ Lurcast checks the certificate at startup and every 12 hours. If it can't get on
 
 ### Transcoding
 
-Re-encodes a mount on another mount: for example a low-bitrate Opus copy of your stream for listeners on mobile data, or an MP3 copy of an Opus stream for older players. It reads MP3, Ogg Vorbis, and Ogg Opus sources; AAC sources can't be transcoded.
+Re-encodes a mount on another mount: for example a low-bitrate Opus copy of your stream for listeners on mobile data, or an MP3 copy of an Opus stream for older players. It reads MP3, Ogg Vorbis, and Ogg Opus sources, and AAC sources when the [FDK AAC library](#aac-with-the-fdk-library) is installed.
 
 ```yaml
 plugins:
@@ -368,8 +368,8 @@ plugins:
     streams:
       - source: /live          # mount to read
         mount: /live.opus      # mount to publish
-        codec: opus            # opus (Ogg Opus) or mp3; default opus
-        bitrate: 64            # kbps; default 64 for Opus, 128 for MP3
+        codec: opus            # opus (Ogg Opus), mp3, or aac; default opus
+        bitrate: 64            # kbps; default 64 for Opus, 128 for MP3 and AAC-LC
         channels: 2            # 1 or 2 (default 2)
       - source: /live
         mount: /live.mp3
@@ -385,6 +385,7 @@ plugins:
 |---|---|---|
 | `opus` | 6 to 256 kbps | Ogg Opus, 48 kHz, 20 ms frames |
 | `mp3` | 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 192, 224, 256, or 320 kbps | constant bit rate MP3; 44.1 kHz from 96 kbps, a lower rate below that |
+| `aac` | 8 to 320 kbps, within what the profile allows | AAC in ADTS, 44.1 kHz; needs the FDK AAC library |
 
 At low bit rates Opus sounds clearly better than MP3.
 
@@ -393,6 +394,28 @@ The target mount appears while the source mount has a source connected, and goes
 Each target must be unique, can't be its own source, and streams can't feed into each other in a loop. Changes to the list apply on a configuration reload (`kill -HUP`), restarting the streams that changed.
 
 MP3 is encoded with [LAME](https://lame.sourceforge.io/), under the LGPL; see [LICENSING.md](LICENSING.md#third-party-code). Releases include it as a separate shared library, `lib/libmp3lame.so.0`, built by `ext/build-lame.sh`, which you can replace with your own build.
+
+#### AAC with the FDK library
+
+Lurcast doesn't include an AAC codec. If the [Fraunhofer FDK AAC](https://github.com/mstorsjo/fdk-aac) library (`libfdk-aac.so.2`) is installed, Lurcast loads it when it starts and can then transcode AAC sources (ADTS or LATM, including HE-AAC) and publish AAC:
+
+```yaml
+      - source: /live
+        mount: /live.aac
+        codec: aac
+        profile: he            # lc (default), he (HE-AAC), or hev2 (HE-AAC v2, stereo only)
+        bitrate: 48            # default 128 for lc, 48 for he, 32 for hev2
+```
+
+Without the library, a stream with `codec: aac` is refused when the configuration is loaded, and AAC sources are logged as not transcodable; everything else works as usual.
+
+- **Docker image:** build your own from it: `FROM ghcr.io/lurcast/lurcast`, then `USER root`, `RUN apk add --no-cache fdk-aac`, and `USER lurcast`.
+- **Release tarball:** Lurcast runs with musl, so it needs a musl build of the library: put `libfdk-aac.so.2` in `/opt/lurcast/lib/` (for example from Alpine's `fdk-aac` package), or on Alpine Linux install that package. A library built for glibc (Debian's or Ubuntu's `libfdk-aac2`) can't be loaded.
+- **Built from source:** the system's `libfdk-aac` is used (Homebrew `fdk-aac`, Debian and Ubuntu `libfdk-aac2`).
+
+Some distributions ship FDK with AAC-LC only (Alpine and Fedora do, because of patents). With such a build, `profile: he` and `hev2` are refused with a message saying so; for HE-AAC, install a full build, such as one compiled from the [upstream source](https://github.com/mstorsjo/fdk-aac).
+
+FDK's license grants no patent rights and allows its use only where you hold the patent licenses it needs (from [Via LA](https://www.via-la.com/) or the patent holders); AAC-LC's US patents have expired, HE-AAC's are still in force in places. Whether you may use it is up to you. Lurcast doesn't distribute FDK; see [LICENSING.md](LICENSING.md#open-source-edition) for the permission to combine the two.
 
 ### Writing a plugin
 

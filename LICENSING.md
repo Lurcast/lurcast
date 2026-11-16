@@ -15,6 +15,21 @@ The streaming server is free software under the GNU Affero General Public Licens
 You may run, study, change, and share it. If you run a modified version as a network service, the
 AGPL requires you to offer that version's source code to its users.
 
+### Additional permission for the Fraunhofer FDK AAC library
+
+Lurcast can use the Fraunhofer FDK AAC library for AAC when an operator installs it. Lurcast does not
+include or distribute that library, and its license is not compatible with the AGPL, so the
+licensors of Lurcast grant this additional permission under section 7 of the GNU AGPL version 3:
+
+> If you modify this Program, or any covered work, by linking or combining it with the Fraunhofer
+> FDK AAC Codec Library (or a modified version of that library), containing parts covered by the
+> terms of the Fraunhofer FDK AAC Codec Library license, the licensors of this Program grant you
+> additional permission to convey the resulting work. Corresponding Source for a non-source form of
+> such a combination shall include the source code for the parts of the Fraunhofer FDK AAC Codec
+> Library used as well as that of the covered work.
+
+The FDK license grants no patent rights; see the README's section on AAC for what that means.
+
 ## Hosting edition
 
 The Hosting edition adds what stream hosting businesses need on top of the open-source server: the

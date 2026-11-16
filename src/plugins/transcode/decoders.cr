@@ -1,3 +1,4 @@
+require "../../aac"
 require "../../mp3"
 require "../../ogg"
 require "./native"
@@ -63,13 +64,19 @@ class Lurcast::Plugins::Transcode < Lurcast::Plugin
     FORMATS = {"mp3", "ogg"}
 
     def self.supported?(format : String) : Bool
-      FORMATS.includes?(format)
+      FORMATS.includes?(format) || format == "aac" && FDK.available?
+    end
+
+    # Why a mount's format can't be transcoded.
+    def self.unsupported_reason(format : String) : String
+      format == "aac" ? "AAC sources need the Fraunhofer FDK AAC library: #{FDK.error}" : "#{format} streams can't be transcoded"
     end
 
     # The decoder for a mount's format ("mp3", "ogg", ...), or nil when it can't be transcoded.
     def self.for(format : String) : Decoder?
       case format
       when "mp3" then MP3Decoder.new
+      when "aac" then FDK.library.try { |fdk| AACDecoder.new(fdk) }
       when "ogg" then OggDecoder.new
       end
     end

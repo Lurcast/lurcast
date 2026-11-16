@@ -144,8 +144,7 @@ describe Lurcast::Plugins::Transcode do
       "- {source: /live, mount: /live.opus, bitrate: 5}"                            => "6 to 256 kbps",
       "- {source: /live, mount: /live.opus, bitrate: 257}"                          => "6 to 256 kbps",
       "- {source: /live, mount: /live.opus, channels: 6}"                           => "must be 1 or 2",
-      "- {source: /live, mount: /live.ogg, codec: vorbis}"                          => "must be opus or mp3",
-      "- {source: /live, mount: /live.aac, codec: aac}"                             => "must be opus or mp3",
+      "- {source: /live, mount: /live.ogg, codec: vorbis}"                          => "must be opus, mp3 or aac",
       "- {source: /live, mount: /live.mp3, codec: mp3, bitrate: 100}"               => "one of 8, 16,",
       "[{source: /live, mount: /x.opus}, {source: /other, mount: /x.opus}]"         => "more than one stream",
       "[{source: /a, mount: /b}, {source: /b, mount: /a}]"                          => "feeds back into itself",
@@ -204,7 +203,7 @@ describe Lurcast::Plugins::Transcode do
     samples = verify_ogg_opus(ogg_pages(output.to_slice), 1)
     rms(samples).should be > 0.05
 
-    Transcode::Decoder.for("aac").should be_nil
+    Transcode::Decoder.for("aac").should be_nil unless Transcode::FDK.available?
     Transcode::Decoder.for("webm").should be_nil
     Transcode::Decoder.supported?("audio/webm").should be_false
     flac = IO::Memory.new
@@ -374,5 +373,68 @@ describe Lurcast::Plugins::Transcode do
     end
   ensure
     server.try(&.stop)
+  end
+
+  it "refuses AAC without the FDK library" do
+    next if Transcode::FDK.available?
+    expect_raises(ArgumentError, "needs the Fraunhofer FDK AAC library") do
+      build_transcode("- {source: /live, mount: /live.aac, codec: aac}")
+    end
+    Transcode::Decoder.supported?("aac").should be_false
+    Transcode::Decoder.unsupported_reason("aac").should contain("libfdk-aac")
+  end
+
+  it "decodes and encodes AAC with the FDK library, when it is installed" do
+    next pending!("libfdk-aac isn't installed") unless Transcode::FDK.available?
+    build_transcode("- {source: /live, mount: /live.aac, codec: aac}").try(&.entries.first.bitrate).should eq(128)
+    {
+      "- {source: /live, mount: /live.aac, codec: aac, profile: hev2, channels: 1}" => "needs 2 channels",
+      "- {source: /live, mount: /live.aac, codec: aac, profile: xhe}"               => "must be lc, he or hev2",
+      "- {source: /live, mount: /live.aac, codec: aac, bitrate: 400}"               => "8 to 320 kbps",
+    }.each do |yaml, message|
+      expect_raises(ArgumentError, message) { build_transcode(yaml) }
+    end
+
+    {"lc" => {128, "LC"}, "he" => {48, "HE-AAC"}, "hev2" => {32, "HE-AACv2"}}.each do |profile, (bitrate, name)|
+      # Some FDK builds (Alpine's, Fedora's) have AAC-LC only.
+      begin
+        Transcode::Encoder.for("aac", bitrate, 2, profile).close
+      rescue ex : ArgumentError
+        profile.should_not eq("lc")
+        ex.message.should eq("this build of libfdk-aac has no #{name.sub("v2", " v2")}; install one with it, or use profile lc")
+        next
+      end
+      {"tone.aac", "tone.latm"}.each do |fixture|
+        encoder = Transcode::Encoder.for("aac", bitrate, 2, profile)
+        output = IO::Memory.new
+        writer = encoder.writer(output)
+        decoder = Transcode::Decoder.for("aac").should_not be_nil
+        decoded = 0
+        File.read(File.join(__DIR__, "..", "fixtures", "hls", fixture)).to_slice.each_slice(1000) do |chunk|
+          decoder.decode(Slice.new(chunk.to_unsafe, chunk.size)) do |pcm, channels, rate|
+            rate.should eq(44_100)
+            channels.should eq(2)
+            decoded += pcm.size // channels
+            encoder.encode(pcm, channels, rate) { |packet| writer.write(packet) }
+          end
+        end
+        decoder.close
+        encoder.close
+        decoded.should be_close(4 * 44_100, 2048)
+
+        path = File.tempname("transcode", ".aac")
+        File.write(path, output.to_slice)
+        begin
+          errors = IO::Memory.new
+          probe = IO::Memory.new
+          Process.run("ffmpeg", ["-v", "error", "-i", path, "-f", "null", "-"], error: errors).success?.should be_true
+          errors.to_s.should eq("")
+          Process.run("ffprobe", ["-v", "error", "-show_entries", "stream=codec_name,profile,channels", "-of", "csv=p=0", path], output: probe)
+          probe.to_s.lines.first.should eq("aac,#{name},2")
+        ensure
+          File.delete(path)
+        end
+      end
+    end
   end
 end
