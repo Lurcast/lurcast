@@ -497,6 +497,12 @@
 
   const TABS = [["overview", "Overview"], ["listeners", "Listeners"], ["history", "Songs"], ["bans", "Bans"], ["settings", "Settings"]];
 
+  // The tabs plugins add for mount `m`.
+  const pluginTabs = (m) => fromPlugins("tabs", m).flat().filter((tab) => tab && tab.id && typeof tab.sections === "function");
+
+  // The tab to show for `m`: the selected one, or the Overview when `m` has no such tab.
+  const activeTab = (m) => (TABS.some(([id]) => id === state.tab) || pluginTabs(m).some((tab) => tab.id === state.tab) ? state.tab : "overview");
+
   // A section keeps its state across polls while it has focus, unsaved input, or (for charts,
   // which load their own data) until `data-until`.
   const preserved = (el) => el && (el.contains(document.activeElement) || el.dataset.dirty === "1" || Number(el.dataset.until || 0) > Date.now());
@@ -540,20 +546,31 @@
       h("span", { class: "detail__actions" },
         m.online ? h("a", { class: "btn btn--sm", href: m.mount, target: "_blank", rel: "noopener" }, icon("play"), "Listen") : null)),
     h("p", { class: "mount__path" }, m.mount, m.online ? ` · ${PROTOCOLS[m.protocol] || m.protocol} · on air for ${duration(m.uptime_seconds)}` : ""),
-    h("div", { class: "tabs", role: "tablist" }, TABS.map(([id, text]) => h("button", {
-      class: "tab", type: "button", role: "tab", "aria-selected": state.tab === id ? "true" : "false",
-      onclick: () => select(m.mount, id, false),
-    }, text,
-    id === "listeners" && m.online ? h("span", { class: "count" }, String(m.listeners)) : null,
-    id === "history" && m.history && m.history.length ? h("span", { class: "count" }, String(m.history.length)) : null))));
+    h("div", { class: "tabs", role: "tablist" },
+      TABS.map(([id, text]) => h("button", {
+        class: "tab", type: "button", role: "tab", "aria-selected": activeTab(m) === id ? "true" : "false",
+        onclick: () => select(m.mount, id, false),
+      }, text,
+      id === "listeners" && m.online ? h("span", { class: "count" }, String(m.listeners)) : null,
+      id === "history" && m.history && m.history.length ? h("span", { class: "count" }, String(m.history.length)) : null)),
+      pluginTabs(m).map((tab) => h("button", {
+        class: "tab", type: "button", role: "tab", "aria-selected": state.tab === tab.id ? "true" : "false",
+        onclick: () => select(m.mount, tab.id, false),
+      }, tab.label, tab.count ? h("span", { class: "count" }, String(tab.count)) : null))));
 
   const buildSections = (m) => {
-    switch (state.tab) {
+    switch (activeTab(m)) {
       case "listeners": return [listenersToolbar(m), listenersTable(m)];
       case "history": return [historySection(m)];
       case "bans": return [bansList(m), banForm(m)];
       case "settings": return [recordingSection(m), stationForm(m), ...fromPlugins("settings", m).flat(), fallbackForm(m), dangerZone(m)];
-      default: return [nowPlaying(m), statsSection(m), historyPanel(m.mount), mountLocations(m), connectSection(m)];
+      default: {
+        const tab = pluginTabs(m).find((t) => t.id === activeTab(m));
+        if (tab) {
+          try { return tab.sections(m); } catch (error) { console.error(`The ${tab.id} tab failed to draw`, error); }
+        }
+        return [nowPlaying(m), statsSection(m), historyPanel(m.mount), mountLocations(m), connectSection(m)];
+      }
     }
   };
 
@@ -576,6 +593,10 @@
   // - links(m): [label, URL] pairs for the listen links
   // - art(m): an image URL to show next to the song playing
   // - settings(m): `section`s for the Settings tab
+  // - tabs(m): tabs of its own, as { id, label, count, sections: (m) => [section, ...] }. The id
+  //   goes in the address (#/live/autodj), so keep it short, lowercase and stable.
+  // - offline(m): what to show instead of "This mount is offline", for example when the plugin
+  //   plays something on the mount's fallback
   const pluginParts = [];
 
   const fromPlugins = (part, m) => {
@@ -603,7 +624,10 @@
   const loadPlugins = () => {
     const dashboard = {
       register: (name, parts) => { pluginParts.push({ name, parts }); },
-      h, icon, section, stat, field, request, action, toast, confirmAction, markDirty, updateSection,
+      h, icon, section, stat, field, request, action, toast, confirmAction, markDirty, updateSection, duration, bytes, modal,
+      // The Authorization header value, for requests `request` can't make, such as uploads that
+      // report their progress.
+      auth: () => state.auth,
       // Signs out and returns true when *error* means the admin login is no longer valid.
       sessionEnded: (error) => {
         if (!(error instanceof AuthError)) return false;
@@ -617,6 +641,8 @@
   };
 
   const nowPlaying = (m) => {
+    const replacement = m.online ? null : fromPlugins("offline", m)[0];
+    if (replacement) return section("now", replacement);
     if (!m.online) {
       return section("now", h("div", { class: "nowplaying" },
         h("p", { class: "nowplaying__song is-empty" }, "This mount is offline"),
@@ -1268,7 +1294,8 @@
     if (!raw) return;
     const [mount, tab] = raw.split("/");
     state.mount = decodeURIComponent(mount);
-    state.tab = TABS.some(([id]) => id === tab) ? tab : "overview";
+    // Plugin tabs are known only once the data has loaded; an unknown tab shows the Overview.
+    state.tab = tab && /^[a-z0-9_-]+$/.test(tab) ? tab : "overview";
   };
 
   const ingest = (data) => {
