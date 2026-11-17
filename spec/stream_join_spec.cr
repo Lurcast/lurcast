@@ -15,8 +15,8 @@ private def publish_file(mount : MountPoint, file : String, chunk = 700, upto : 
   bytes
 end
 
-private def mount_for(content_type : String, burst = 8192) : MountPoint
-  mount = MountPoint.new("/join", burst, burst * 8)
+private def mount_for(content_type : String, burst = 8192, send_interval = Time::Span.zero) : MountPoint
+  mount = MountPoint.new("/join", burst, burst * 8, send_interval: send_interval)
   mount.apply_headers(HTTP::Headers{"Content-Type" => content_type})
   mount.connect_source(IO::Memory.new, SourceProtocol::Icecast)
   mount
@@ -139,6 +139,32 @@ describe "Late-joining listeners" do
     received[header.size, 4].should eq(Bytes[0x1F, 0x43, 0xB6, 0x75])
     decoded_frames(received, "webm", "clip.webm").should be > 10
     received.size.should eq(header.size + bytes.size - 8039)
+  ensure
+    mount.try(&.remove_listener(listener)) if listener
+  end
+
+  it "join mid-stream when the mount sends in batches" do
+    mount = mount_for("video/webm", burst: 4096, send_interval: 1.hour)
+    bytes = File.read("#{FIXTURES}/clip.webm").to_slice
+    header = Matroska::Join.new(1 << 20).tap(&.feed(bytes)).header.should_not be_nil
+    publish_file(mount, "clip.webm", upto: 7900)
+    mount.flush
+    listener = IO::Memory.new
+    mount.add_listener(listener, "127.0.0.1", false)
+    wait_until { listener.size >= header.size }
+    listener.to_slice.should eq(header)
+
+    offset = 7900
+    while offset < bytes.size
+      size = Math.min(500, bytes.size - offset)
+      mount.publish(bytes[offset, size])
+      offset += size
+    end
+    mount.flush
+    wait_until { listener.size == header.size + bytes.size - 8039 }
+    received = listener.to_slice.dup
+    received[header.size, 4].should eq(Bytes[0x1F, 0x43, 0xB6, 0x75])
+    decoded_frames(received, "webm", "clip.webm").should be > 10
   ensure
     mount.try(&.remove_listener(listener)) if listener
   end

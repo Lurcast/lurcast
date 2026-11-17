@@ -733,6 +733,7 @@ class IcecastServer
       @config.queue_size_for(mount),
       @config.metadata_interval_for(mount, source_interval),
       @config.song_history_size,
+      @config.send_interval_for(mount),
     )
     point.on_song_change = ->(song : String, at : Time) { notify_song_change(mount, point, song, at) }
     point

@@ -82,6 +82,8 @@ Lurcast uses Crystal 1.21's parallel execution context and scales up to the logi
 
 `burst_size` controls the audio sent to a newly connected listener, `queue_size` limits each slow listener's pending audio bytes, and `metadata_interval` controls ICY metadata insertion. The burst must not exceed the queue. Existing configurations may still use `buffer_size` as an alias for `burst_size`. `header_timeout` and `source_timeout` can split the connection-header and source-idle limits; both default to `timeout`.
 
+`send_interval_ms` (default 250) lets a mount hold its source's audio for that long and send it to listeners in one piece. Encoders usually send one MP3 frame at a time, about 38 a second, and a write to every listener for each of them is most of the server's CPU. With 2,000 listeners on an Apple M1 Pro, the server used about 6.5 s of CPU per 15 s with 0 (each piece sent as it comes), 2.4 s with 100, 1.6 s with 250, and 0.9 s with 500. It adds at most that much delay, which players' own buffering of several seconds hides; set it lower, or 0, on a mount that needs the least delay. It can be set per mount.
+
 `max_connections_per_ip` (default 5) limits sources, API and admin requests, and connections still sending headers from one address. Listeners stop counting against it once their stream starts, so many players behind one NAT address can tune in; set `max_listeners_per_ip` to cap them separately (unlimited by default). `rate_limit` new connections per `rate_limit_window` seconds still apply to every connection.
 
 ## Optional services
@@ -118,6 +120,7 @@ mounts:
     burst_size: 32768
     queue_size: 262144
     metadata_interval: 16000
+    send_interval_ms: 250
     max_listeners: 500
     max_listener_duration: 21600
     fallback: /backup

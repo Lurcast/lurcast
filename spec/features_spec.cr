@@ -75,7 +75,8 @@ describe "Access log" do
     listener.print "GET /live HTTP/1.0\r\nUser-Agent: SpecPlayer\r\n\r\n"
     read_head(listener)
     send_frames(source, 2)
-    sleep 50.milliseconds
+    listener.read_timeout = 2.seconds
+    listener.read(Bytes.new(64)).should be > 0
     listener.close
 
     log = File.join(dir, "access.log")
