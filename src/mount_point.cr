@@ -23,6 +23,9 @@ class MountPoint
   EMPTY_METADATA_BLOCK      = Bytes[0_u8]
   MAX_POOLED_STITCH         = 65_536
   MAX_STITCH_BUFFERS        =     64
+  # A batch is sent sooner once it holds this much, or the burst size or a quarter of the listener
+  # queue when either is smaller.
+  MAX_BATCH_BYTES = 65_536
 
   @@stitch_buffers = [] of IO::Memory
   @@stitch_mutex = Mutex.new
@@ -67,6 +70,20 @@ class MountPoint
         return packet if packet
         return if closed
         @ready.receive?
+      end
+    end
+
+    # Moves queued packets into *io* while they fit in *limit* bytes, and returns how many bytes moved.
+    def drain(io : IO, limit : Int) : Int32
+      @mutex.synchronize do
+        moved = 0
+        while (packet = @packets.first?) && moved + packet.size <= limit
+          @packets.shift
+          @bytesize -= packet.size
+          io.write(packet)
+          moved += packet.size
+        end
+        moved
       end
     end
 
@@ -272,6 +289,11 @@ class MountPoint
   @aac_transport : AAC::Transport?
   # Join points for formats whose listeners need headers first (native FLAC, Matroska and WebM).
   @join : StreamJoin?
+  # Audio from the source not yet sent on, and when the first of it arrived.
+  @batch = IO::Memory.new
+  @batch_started : Time::Instant?
+  @batch_number = 0_u64
+  @batch_limit : Int32
 
   def initialize(
     @mount : String,
@@ -279,11 +301,14 @@ class MountPoint
     @queue_size = DEFAULT_QUEUE_SIZE,
     @metadata_interval = DEFAULT_METADATA_INTERVAL,
     @song_history_size = DEFAULT_SONG_HISTORY_SIZE,
+    @send_interval : Time::Span = Time::Span.zero,
   )
     raise ArgumentError.new("stream buffer sizes and metadata interval must be positive") unless {burst_size, @queue_size, @metadata_interval}.all?(&.positive?)
     raise ArgumentError.new("song history size must not be negative") if @song_history_size.negative?
     raise ArgumentError.new("burst size must not exceed queue size") if burst_size > @queue_size
     @buffer = Bytes.new(burst_size)
+    # Joins look back over twice the burst, so a batch no bigger than the burst keeps its join points.
+    @batch_limit = {MAX_BATCH_BYTES, @queue_size // 4, burst_size}.min
   end
 
   def connect_source(io : IO, protocol : SourceProtocol)
@@ -467,6 +492,7 @@ class MountPoint
 
   def detach_listeners(requested_mount : String? = nil, *, id : Int64? = nil) : Array(Listener)
     @broadcast_mutex.synchronize do
+      flush_batch
       @listeners_mutex.synchronize do
         listeners = @listeners.compact_map do |_io, listener|
           next if id && listener.id != id
@@ -504,44 +530,84 @@ class MountPoint
     detach_listeners.each(&.close)
   end
 
+  # Takes audio from the source. With a *send_interval* it is held for up to that long and sent on in
+  # one piece, so each listener gets a few larger writes a second instead of one per packet the
+  # source sends (often one per MP3 frame, about 38 a second): socket writes are most of the
+  # server's CPU. Without one (the default) each piece is sent on as it comes.
   def publish(data : Bytes)
     return if data.empty?
 
     @broadcast_mutex.synchronize do
-      stream_data = synchronize_audio(data)
-      return if stream_data.empty?
+      unless @send_interval.positive?
+        broadcast(data)
+        next
+      end
+      now = Time.instant
+      started = @batch_started ||= begin
+        number = @batch_number &+= 1
+        spawn flush_later(number), name: "mount batch"
+        now
+      end
+      @batch.write(data)
+      flush_batch if @batch.bytesize >= @batch_limit || now - started >= @send_interval
+    end
+  end
 
-      capture_mp3_info(stream_data) if mp3?
-      @aac_transport ||= AAC.parse_header(stream_data).try(&.transport) if aac?
-      capture_ogg_headers(stream_data) if ogg?
-      join = @join
-      chunk_start = join.try(&.position) || 0_i64
-      join = feed_join(join, stream_data) if join
-      append_to_buffer(stream_data)
-      feed_taps(stream_data)
-      dead = nil.as(Array(Listener)?)
-      @listeners_mutex.synchronize do
-        return if @listeners.empty?
-        shared_packet = stream_data.dup
-        joined = nil.as(Bytes?)
-        @listeners.each_value do |listener|
-          packet = shared_packet
-          if listener.awaiting_join?
-            joined ||= join.try { |active| join_packet(active, chunk_start, stream_data) } || Bytes.empty
-            next if joined.empty?
-            packet = joined
-            listener.awaiting_join = false
-          end
-          unless listener.queue.enqueue(packet)
-            (dead ||= [] of Listener) << listener
-          end
+  # Sends on the audio held back, as when the source leaves or listeners move to another mount.
+  def flush : Nil
+    @broadcast_mutex.synchronize { flush_batch }
+  end
+
+  # Sends batch *number* once it is due, in case the source pauses before sending more.
+  private def flush_later(number : UInt64) : Nil
+    sleep @send_interval
+    @broadcast_mutex.synchronize { flush_batch if @batch_number == number }
+  end
+
+  # Called with the broadcast lock held.
+  private def flush_batch : Nil
+    @batch_started = nil
+    return if @batch.bytesize.zero?
+    broadcast(@batch.to_slice)
+    @batch.clear
+  end
+
+  # Frames *data*, keeps it for the burst, taps and joins, and queues it for every listener. Called
+  # with the broadcast lock held; *data* is reused afterwards, so whatever keeps it copies it.
+  private def broadcast(data : Bytes) : Nil
+    stream_data = synchronize_audio(data)
+    return if stream_data.empty?
+
+    capture_mp3_info(stream_data) if mp3?
+    @aac_transport ||= AAC.parse_header(stream_data).try(&.transport) if aac?
+    capture_ogg_headers(stream_data) if ogg?
+    join = @join
+    chunk_start = join.try(&.position) || 0_i64
+    join = feed_join(join, stream_data) if join
+    append_to_buffer(stream_data)
+    feed_taps(stream_data)
+    dead = nil.as(Array(Listener)?)
+    @listeners_mutex.synchronize do
+      return if @listeners.empty?
+      shared_packet = stream_data.dup
+      joined = nil.as(Bytes?)
+      @listeners.each_value do |listener|
+        packet = shared_packet
+        if listener.awaiting_join?
+          joined ||= join.try { |active| join_packet(active, chunk_start, stream_data) } || Bytes.empty
+          next if joined.empty?
+          packet = joined
+          listener.awaiting_join = false
         end
-        if dead
-          dead.each { |listener| @listeners.delete(listener.io) }
+        unless listener.queue.enqueue(packet)
+          (dead ||= [] of Listener) << listener
         end
       end
-      dead.try { |listeners| listeners.each(&.close) }
+      if dead
+        dead.each { |listener| @listeners.delete(listener.io) }
+      end
     end
+    dead.try { |listeners| listeners.each(&.close) }
   end
 
   # Called after the song changes, outside the metadata lock.
@@ -674,6 +740,7 @@ class MountPoint
   end
 
   def disconnect_source
+    flush
     source = @source_mutex.synchronize do
       current = @source
       @source = nil
@@ -748,7 +815,16 @@ class MountPoint
     send_stream(listener, intro)
     send_stream(listener, burst)
     while data = listener.queue.receive?
-      send_stream(listener, data)
+      if listener.queue.bytesize.zero?
+        send_stream(listener, data)
+      else
+        # Behind (a slow connection, or the burst still going out): what is queued leaves in one write.
+        with_stitch_buffer do |buffer|
+          buffer.write(data)
+          listener.queue.drain(buffer, MAX_POOLED_STITCH - data.size)
+          send_stream(listener, buffer.to_slice)
+        end
+      end
     end
   rescue IO::Error | Channel::ClosedError
   ensure
@@ -862,6 +938,7 @@ class MountPoint
 
   private def reset_frame_sync
     @broadcast_mutex.synchronize do
+      flush_batch
       @frame_pending.clear
       @frame_synced = false
       @mp3_free_format_bytes = nil

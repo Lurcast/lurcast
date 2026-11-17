@@ -33,6 +33,7 @@ class MountConfig
   property burst_size : Int32?
   property queue_size : Int32?
   property metadata_interval : Int32?
+  property send_interval_ms : Int32?
   property max_listeners : Int32?
   property max_listener_duration : Int32?
   property fallback : String?
@@ -59,6 +60,7 @@ class MountConfig
     @hidden : Bool = false,
     @intro : String? = nil,
     @record : Bool = false,
+    @send_interval_ms : Int32? = nil,
   )
   end
 end
@@ -82,6 +84,9 @@ class Config
   property burst_size : Int32 = 65_536
   property queue_size : Int32 = 524_288
   property metadata_interval : Int32 = 8192
+  # How long a mount may hold its source's audio to send it in fewer, larger writes, which takes
+  # most of the CPU off listeners. 0 sends each piece as it comes; players buffer far longer anyway.
+  property send_interval_ms : Int32 = 250
   @[YAML::Field(key: "buffer_size", ignore_serialize: true)]
   @legacy_buffer_size : Int32?
   property timeout : Int32 = 30
@@ -162,7 +167,7 @@ class Config
       master_url, master_username, master_password, recordings_dir, data_dir
     apply_int_env port, max_listeners, max_sources, max_connections_per_ip, max_listeners_per_ip, queue_size,
       metadata_interval, timeout, header_timeout, source_timeout, rate_limit, rate_limit_window, tls_port, shoutcast_port,
-      fallback_file_bitrate, master_update_interval
+      fallback_file_bitrate, master_update_interval, send_interval_ms
     @burst_size = env_int("BURST_SIZE") || env_int("BUFFER_SIZE") || @burst_size
     @log_level = env("LOG_LEVEL").try { |value| Log::Severity.parse(value) } || @log_level
     @allowed_origins = env("ALLOWED_ORIGINS").try { |origins| origins.split(',').map!(&.strip) } || @allowed_origins
@@ -181,6 +186,7 @@ class Config
     raise ArgumentError.new("timeouts must be positive") unless [@header_timeout, @source_timeout].compact.all?(&.positive?)
     raise ArgumentError.new("max_listeners_per_ip must be positive") if @max_listeners_per_ip.try { |value| !value.positive? }
     raise ArgumentError.new("burst_size must not exceed queue_size") if @burst_size > @queue_size
+    validate_send_interval!(@send_interval_ms, "send_interval_ms")
     validate_optional_port!(@tls_port, "tls_port")
     validate_optional_port!(@shoutcast_port, "shoutcast_port")
     validate_unique!([@port, @tls_port, @shoutcast_port].compact, "listener ports must be unique")
@@ -248,6 +254,10 @@ class Config
 
   def burst_size_for(mount : String) : Int32
     mount_settings(mount).try(&.burst_size) || @burst_size
+  end
+
+  def send_interval_for(mount : String) : Time::Span
+    (mount_settings(mount).try(&.send_interval_ms) || @send_interval_ms).milliseconds
   end
 
   # Names of the password settings still at the built-in default, which anyone can guess.
@@ -351,6 +361,7 @@ class Config
     burst_size = settings.burst_size || @burst_size
     queue_size = settings.queue_size || @queue_size
     raise ArgumentError.new("mount #{mount} burst_size must not exceed queue_size") if burst_size > queue_size
+    settings.send_interval_ms.try { |value| validate_send_interval!(value, "mount #{mount} send_interval_ms") }
     if fallback = settings.fallback
       validate_mount!(fallback, "mount fallback")
       raise ArgumentError.new("mount fallback must differ from its source mount") if mount == fallback
@@ -397,6 +408,10 @@ class Config
 
   private def validate_optional_port!(port : Int32?, name : String)
     raise ArgumentError.new("#{name} must be between 1 and 65535") if port && !(1 <= port <= 65_535)
+  end
+
+  private def validate_send_interval!(value : Int32, name : String)
+    raise ArgumentError.new("#{name} must be between 0 and 2000") unless 0 <= value <= 2000
   end
 
   private def validate_unique!(values : Array(T), message : String) forall T
