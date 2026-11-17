@@ -26,6 +26,12 @@ class MountPoint
   # A batch is sent sooner once it holds this much, or the burst size or a quarter of the listener
   # queue when either is smaller.
   MAX_BATCH_BYTES = 65_536
+  # With `burst_seconds` or `queue_seconds`, how often the mount measures its source's rate, and how far
+  # off a size may be before it is changed. Sizes stay within MIN_BUFFER_BYTES and MAX_BUFFER_BYTES.
+  RATE_WINDOW      = 10.seconds
+  RESIZE_THRESHOLD = 0.25
+  MIN_BUFFER_BYTES = 4096
+  MAX_BUFFER_BYTES = 32 * 1024 * 1024
 
   @@stitch_buffers = [] of IO::Memory
   @@stitch_mutex = Mutex.new
@@ -293,7 +299,9 @@ class MountPoint
   @batch = IO::Memory.new
   @batch_started : Time::Instant?
   @batch_number = 0_u64
-  @batch_limit : Int32
+  # Bytes counted since *@rate_started*, to measure the source's rate.
+  @rate_bytes = 0_i64
+  @rate_started : Time::Instant?
 
   def initialize(
     @mount : String,
@@ -302,13 +310,14 @@ class MountPoint
     @metadata_interval = DEFAULT_METADATA_INTERVAL,
     @song_history_size = DEFAULT_SONG_HISTORY_SIZE,
     @send_interval : Time::Span = Time::Span.zero,
+    @burst_seconds : Float64? = nil,
+    @queue_seconds : Float64? = nil,
+    @rate_window : Time::Span = RATE_WINDOW,
   )
     raise ArgumentError.new("stream buffer sizes and metadata interval must be positive") unless {burst_size, @queue_size, @metadata_interval}.all?(&.positive?)
     raise ArgumentError.new("song history size must not be negative") if @song_history_size.negative?
     raise ArgumentError.new("burst size must not exceed queue size") if burst_size > @queue_size
     @buffer = Bytes.new(burst_size)
-    # Joins look back over twice the burst, so a batch no bigger than the burst keeps its join points.
-    @batch_limit = {MAX_BATCH_BYTES, @queue_size // 4, burst_size}.min
   end
 
   def connect_source(io : IO, protocol : SourceProtocol)
@@ -316,7 +325,11 @@ class MountPoint
       @source = io
       @source_protocol = protocol
     end
-    @broadcast_mutex.synchronize { @join = new_join }
+    @broadcast_mutex.synchronize do
+      @join = new_join
+      @rate_started = nil
+      @rate_bytes = 0_i64
+    end
   end
 
   def source : IO?
@@ -352,6 +365,10 @@ class MountPoint
     end
     if bitrate = headers["Ice-Bitrate"]? || headers["Icy-Br"]? || headers["X-Audiocast-Bitrate"]?
       @bitrate.set(bitrate.to_i? || self.bitrate, :relaxed)
+      # Until the rate is measured, burst and queue lengths in seconds go by the declared bitrate.
+      if (@burst_seconds || @queue_seconds) && (kbps = bitrate.to_i?) && kbps.positive?
+        @broadcast_mutex.synchronize { size_for_rate(kbps * 125.0) }
+      end
     end
   end
 
@@ -549,7 +566,7 @@ class MountPoint
         now
       end
       @batch.write(data)
-      flush_batch if @batch.bytesize >= @batch_limit || now - started >= @send_interval
+      flush_batch if @batch.bytesize >= batch_limit || now - started >= @send_interval
     end
   end
 
@@ -564,6 +581,15 @@ class MountPoint
     @broadcast_mutex.synchronize { flush_batch if @batch_number == number }
   end
 
+  # The most a batch holds before it goes out early: the burst size, a quarter of the listener queue,
+  # or 64 KiB, whichever is smallest, and never more than half the window a join looks back over,
+  # so a batch keeps its join points.
+  private def batch_limit : Int32
+    limit = {MAX_BATCH_BYTES, @queue_size // 4, @buffer.size}.min
+    @join.try { |join| limit = Math.min(limit, join.window // 2) }
+    limit
+  end
+
   # Called with the broadcast lock held.
   private def flush_batch : Nil
     @batch_started = nil
@@ -575,6 +601,7 @@ class MountPoint
   # Frames *data*, keeps it for the burst, taps and joins, and queues it for every listener. Called
   # with the broadcast lock held; *data* is reused afterwards, so whatever keeps it copies it.
   private def broadcast(data : Bytes) : Nil
+    measure_rate(data.size)
     stream_data = synchronize_audio(data)
     return if stream_data.empty?
 
@@ -678,6 +705,56 @@ class MountPoint
 
   # The audio a new listener starts with, and whether it must wait for a join point before getting
   # more: with a native FLAC or Matroska stream, the headers and then the stream from a clean boundary.
+  # With burst or queue lengths in seconds, sizes them every *rate_window* from the rate the source
+  # actually sends at, which VBR, FLAC and Ogg streams don't declare. Called with the broadcast lock held.
+  private def measure_rate(bytes : Int32) : Nil
+    return unless @burst_seconds || @queue_seconds
+    now = Time.instant
+    started = @rate_started ||= now
+    @rate_bytes += bytes
+    elapsed = now - started
+    return if elapsed < @rate_window
+    size_for_rate(@rate_bytes / elapsed.total_seconds)
+    @rate_started = now
+    @rate_bytes = 0_i64
+  end
+
+  # Sets the burst and queue given in seconds for a stream of *bytes_per_second*, when the current
+  # size is more than RESIZE_THRESHOLD off. Listeners already connected keep their queue size.
+  # Called with the broadcast lock held.
+  private def size_for_rate(bytes_per_second : Float64) : Nil
+    return unless bytes_per_second.positive?
+    burst = @burst_seconds.try { |seconds| bytes_for(seconds, bytes_per_second) } || @buffer.size
+    queue = @queue_seconds.try { |seconds| bytes_for(seconds, bytes_per_second) } || @queue_size
+    if @queue_seconds
+      queue = Math.max(queue, burst)
+    else
+      burst = Math.min(burst, queue)
+    end
+    resize_burst(burst) if off?(burst, @buffer.size)
+    @queue_size = queue if off?(queue, @queue_size)
+  end
+
+  private def bytes_for(seconds : Float64, bytes_per_second : Float64) : Int32
+    (seconds * bytes_per_second).round.to_i64.clamp(MIN_BUFFER_BYTES, MAX_BUFFER_BYTES).to_i32
+  end
+
+  private def off?(wanted : Int32, current : Int32) : Bool
+    (wanted - current).abs > current * RESIZE_THRESHOLD
+  end
+
+  # Keeps the newest audio that fits in the new size.
+  private def resize_burst(size : Int32) : Nil
+    audio = buffered_audio
+    @buffer_mutex.synchronize do
+      kept = audio[Math.max(audio.size - size, 0)..]
+      @buffer = Bytes.new(size)
+      kept.copy_to(@buffer)
+      @buffer_start = 0
+      @buffer_size = kept.size
+    end
+  end
+
   private def listener_start : {Bytes, Bool}
     join = @join
     header = join.try(&.header)

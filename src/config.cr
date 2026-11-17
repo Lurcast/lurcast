@@ -32,6 +32,9 @@ class MountConfig
 
   property burst_size : Int32?
   property queue_size : Int32?
+  # The burst and queue as seconds of audio, sized from the stream's rate; they replace the byte sizes.
+  property burst_seconds : Float64?
+  property queue_seconds : Float64?
   property metadata_interval : Int32?
   property send_interval_ms : Int32?
   property max_listeners : Int32?
@@ -61,6 +64,8 @@ class MountConfig
     @intro : String? = nil,
     @record : Bool = false,
     @send_interval_ms : Int32? = nil,
+    @burst_seconds : Float64? = nil,
+    @queue_seconds : Float64? = nil,
   )
   end
 end
@@ -81,8 +86,18 @@ class Config
   property max_connections_per_ip : Int32 = 5
   # Concurrent listeners per address; unset means unlimited, since many players can share one NAT address.
   property max_listeners_per_ip : Int32?
+  # The most outgoing listener bandwidth, in kbit/s, counted as each listener's stream bitrate. A
+  # new listener who would go over it is turned away (or redirected, see `redirect_servers`).
+  property max_bandwidth_kbps : Int32?
+  # Other servers carrying the same mounts (relays of this one), such as `https://relay1.example.com`.
+  # A listener who finds a mount or this server full is redirected to the next one in turn.
+  property redirect_servers : Array(String) = [] of String
   property burst_size : Int32 = 65_536
   property queue_size : Int32 = 524_288
+  # The burst and queue as seconds of audio instead of bytes: a mount sizes them from the rate its
+  # source declares, then from the rate it measures. A mount's own sizes, in either unit, come first.
+  property burst_seconds : Float64?
+  property queue_seconds : Float64?
   property metadata_interval : Int32 = 8192
   # How long a mount may hold its source's audio to send it in fewer, larger writes, which takes
   # most of the CPU off listeners. 0 sends each piece as it comes; players buffer far longer anyway.
@@ -167,10 +182,11 @@ class Config
       master_url, master_username, master_password, recordings_dir, data_dir
     apply_int_env port, max_listeners, max_sources, max_connections_per_ip, max_listeners_per_ip, queue_size,
       metadata_interval, timeout, header_timeout, source_timeout, rate_limit, rate_limit_window, tls_port, shoutcast_port,
-      fallback_file_bitrate, master_update_interval, send_interval_ms
+      fallback_file_bitrate, master_update_interval, send_interval_ms, max_bandwidth_kbps
     @burst_size = env_int("BURST_SIZE") || env_int("BUFFER_SIZE") || @burst_size
     @log_level = env("LOG_LEVEL").try { |value| Log::Severity.parse(value) } || @log_level
     @allowed_origins = env("ALLOWED_ORIGINS").try { |origins| origins.split(',').map!(&.strip) } || @allowed_origins
+    @redirect_servers = env("REDIRECT_SERVERS").try { |servers| servers.split(',').map!(&.strip).reject!(&.empty?) } || @redirect_servers
     @fallback_override = env_bool("FALLBACK_OVERRIDE", @fallback_override)
     @relays_on_demand = env_bool("RELAYS_ON_DEMAND", @relays_on_demand)
   end
@@ -187,6 +203,14 @@ class Config
     raise ArgumentError.new("max_listeners_per_ip must be positive") if @max_listeners_per_ip.try { |value| !value.positive? }
     raise ArgumentError.new("burst_size must not exceed queue_size") if @burst_size > @queue_size
     validate_send_interval!(@send_interval_ms, "send_interval_ms")
+    raise ArgumentError.new("max_bandwidth_kbps must be positive") if @max_bandwidth_kbps.try { |value| !value.positive? }
+    validate_seconds!(@burst_seconds, @queue_seconds, "")
+    @redirect_servers.each do |server|
+      uri = URI.parse(server)
+      unless uri.scheme.in?("http", "https") && uri.host.presence && uri.path.in?("", "/") && uri.query.nil?
+        raise ArgumentError.new("redirect_servers entry #{server} must be an http or https URL with no path")
+      end
+    end
     validate_optional_port!(@tls_port, "tls_port")
     validate_optional_port!(@shoutcast_port, "shoutcast_port")
     validate_unique!([@port, @tls_port, @shoutcast_port].compact, "listener ports must be unique")
@@ -281,6 +305,25 @@ class Config
     mount_settings(mount).try(&.queue_size) || @queue_size
   end
 
+  # The burst length in seconds for *mount*, or nil when it is a byte size. A mount's own setting, in
+  # either unit, comes before the global one.
+  def burst_seconds_for(mount : String) : Float64?
+    settings = mount_settings(mount)
+    if seconds = settings.try(&.burst_seconds)
+      return seconds
+    end
+    @burst_seconds unless settings.try(&.burst_size)
+  end
+
+  # Like `burst_seconds_for`, for the queue.
+  def queue_seconds_for(mount : String) : Float64?
+    settings = mount_settings(mount)
+    if seconds = settings.try(&.queue_seconds)
+      return seconds
+    end
+    @queue_seconds unless settings.try(&.queue_size)
+  end
+
   def metadata_interval_for(mount : String, source_interval : Int32? = nil) : Int32
     mount_settings(mount).try(&.metadata_interval) || source_interval || @metadata_interval
   end
@@ -362,6 +405,7 @@ class Config
     queue_size = settings.queue_size || @queue_size
     raise ArgumentError.new("mount #{mount} burst_size must not exceed queue_size") if burst_size > queue_size
     settings.send_interval_ms.try { |value| validate_send_interval!(value, "mount #{mount} send_interval_ms") }
+    validate_seconds!(settings.burst_seconds, settings.queue_seconds, "mount #{mount} ")
     if fallback = settings.fallback
       validate_mount!(fallback, "mount fallback")
       raise ArgumentError.new("mount fallback must differ from its source mount") if mount == fallback
@@ -412,6 +456,16 @@ class Config
 
   private def validate_send_interval!(value : Int32, name : String)
     raise ArgumentError.new("#{name} must be between 0 and 2000") unless 0 <= value <= 2000
+  end
+
+  private def validate_seconds!(burst : Float64?, queue : Float64?, prefix : String)
+    {burst, queue}.each do |value|
+      next unless value
+      raise ArgumentError.new("#{prefix}burst_seconds and queue_seconds must be between 0 and 600") unless 0 < value <= 600
+    end
+    if burst && queue && burst > queue
+      raise ArgumentError.new("#{prefix}burst_seconds must not exceed queue_seconds")
+    end
   end
 
   private def validate_unique!(values : Array(T), message : String) forall T
