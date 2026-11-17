@@ -42,6 +42,8 @@ class IcecastServer
   @last_request_prune : Time::Instant? = nil
   @active_listeners = 0
   @pending_listeners = Hash(UInt64, Int32).new(0)
+  # Which of `redirect_servers` the next redirected listener goes to.
+  @redirect_next = Atomic(UInt64).new(0_u64)
   @limits_mutex = Mutex.new
   @servers = Set(TCPServer).new
   @servers_mutex = Mutex.new
@@ -59,7 +61,11 @@ class IcecastServer
     Reserved
     GlobalFull
     MountFull
+    BandwidthFull
   end
+
+  # Added to the URL of a listener redirected to another server, so that server doesn't redirect it on.
+  REDIRECT_MARKER = "lurcast_redirect"
 
   def initialize(@config : Config)
     setup_features
@@ -279,7 +285,7 @@ class IcecastServer
       elsif path.ends_with?(".m3u")
         handle_playlist(client, path.rchop(".m3u"), headers, head)
       elsif mount = canonical_mount(path)
-        handle_listener(client, mount, headers, address, slot, head)
+        handle_listener(client, mount, headers, address, slot, head, request.query)
       else
         send_response(client, 404, "Not found")
       end
@@ -410,7 +416,7 @@ class IcecastServer
     end
   end
 
-  private def handle_listener(client : IO, mount : String, headers : HTTP::Headers, address : String, slot : ConnectionSlot, head : Bool)
+  private def handle_listener(client : IO, mount : String, headers : HTTP::Headers, address : String, slot : ConnectionSlot, head : Bool, query : String? = nil)
     user_agent = headers["User-Agent"]? || ""
     client_ip = client_address(headers, address)
     if @bans.match(client_ip, user_agent, mount)
@@ -439,10 +445,12 @@ class IcecastServer
       return
     end
 
-    reservation = reserve_listener(mountpoint)
+    # Another server relaying this one logs in with the relay password and skips the listener limits.
+    relay = relay_listener?(headers)
+    reservation = reserve_listener(mountpoint, relay)
     if reservation.mount_full? && @config.fallback_when_full?(mount)
       if fallback = resolve_mount(@config.fallback_for(mount), mountpoint)
-        fallback_reservation = reserve_listener(fallback)
+        fallback_reservation = reserve_listener(fallback, relay)
         if fallback_reservation.reserved?
           mountpoint = fallback
           reservation = fallback_reservation
@@ -450,12 +458,16 @@ class IcecastServer
       end
     end
     unless reservation.reserved?
-      send_response(client, 503, "Listener limit reached")
+      if location = redirect_location(mount, query)
+        send_response(client, 302, "Listener limit reached; try #{location}", extra_headers: HTTP::Headers{"Location" => location}, head: head)
+      else
+        send_response(client, 503, "Listener limit reached", head: head)
+      end
       return
     end
     reserved_mountpoint = mountpoint
     unless head
-      unless promote_to_listener(address, slot)
+      unless promote_to_listener(address, slot, relay)
         send_response(client, 429, "Too many listeners from this address")
         return
       end
@@ -745,6 +757,8 @@ class IcecastServer
       @config.metadata_interval_for(mount, source_interval),
       @config.song_history_size,
       @config.send_interval_for(mount),
+      burst_seconds: @config.burst_seconds_for(mount),
+      queue_seconds: @config.queue_seconds_for(mount),
     )
     point.on_song_change = ->(song : String, at : Time) { notify_song_change(mount, point, song, at) }
     point
@@ -1057,10 +1071,10 @@ class IcecastServer
   end
 
   # Swaps the request's connection slot for a listener slot, enforcing `max_listeners_per_ip`.
-  private def promote_to_listener(ip : String, slot : ConnectionSlot) : Bool
+  private def promote_to_listener(ip : String, slot : ConnectionSlot, relay = false) : Bool
     @limits_mutex.synchronize do
       count = @listener_addresses[ip]
-      return false if @config.max_listeners_per_ip.try { |maximum| count >= maximum }
+      return false if !relay && @config.max_listeners_per_ip.try { |maximum| count >= maximum }
 
       @listener_addresses[ip] = count + 1
       decrement(@connections, ip) if slot.held?
@@ -1083,14 +1097,45 @@ class IcecastServer
     end
   end
 
-  private def reserve_listener(mountpoint : MountPoint) : ListenerReservation
-    @limits_mutex.synchronize do
-      return ListenerReservation::GlobalFull if @active_listeners >= @config.max_listeners
+  # Whether the request logs in with the relay credentials, as another server relaying this one does.
+  private def relay_listener?(headers : HTTP::Headers) : Bool
+    authenticate(headers, @config.relay_username, @config.relay_password)
+  end
 
+  # Outgoing listener bandwidth in kbit/s, counted as each listener's stream bitrate.
+  private def listener_bandwidth_kbps : Int64
+    streams.sum(0_i64) { |stream| stream.listener_count.to_i64 * stream.bitrate }
+  end
+
+  # Where to send a listener who found *mount* or this server full: the next of `redirect_servers`,
+  # or nil when there are none or the listener was already redirected here.
+  private def redirect_location(mount : String, query : String?) : String?
+    servers = @config.redirect_servers
+    return if servers.empty?
+    params = HTTP::Params.parse(query || "")
+    return if params.has_key?(REDIRECT_MARKER)
+    params[REDIRECT_MARKER] = "1"
+    server = servers[(@redirect_next.add(1_u64) % servers.size).to_i]
+    "#{server.rstrip('/')}#{URI.encode_path(mount)}?#{params}"
+  end
+
+  # Holds a listener place on *mountpoint*, unless the server, the mount or `max_bandwidth_kbps` is
+  # full. A *relay* (another server relaying this one) skips those limits but still counts.
+  private def reserve_listener(mountpoint : MountPoint, relay = false) : ListenerReservation
+    bandwidth = listener_bandwidth_kbps if @config.max_bandwidth_kbps && !relay
+    @limits_mutex.synchronize do
       id = mountpoint.object_id
-      if maximum = @config.max_listeners_for(mountpoint.mount)
-        current = mountpoint.listener_count + @pending_listeners[id]
-        return ListenerReservation::MountFull if current >= maximum
+      unless relay
+        return ListenerReservation::GlobalFull if @active_listeners >= @config.max_listeners
+        if maximum = @config.max_listeners_for(mountpoint.mount)
+          current = mountpoint.listener_count + @pending_listeners[id]
+          return ListenerReservation::MountFull if current >= maximum
+        end
+        if (maximum = @config.max_bandwidth_kbps) && bandwidth
+          # Listeners still connecting are counted at this mount's bitrate.
+          pending = @pending_listeners.sum { |_id, count| count }
+          return ListenerReservation::BandwidthFull if bandwidth + (pending + 1).to_i64 * mountpoint.bitrate > maximum
+        end
       end
 
       @active_listeners += 1

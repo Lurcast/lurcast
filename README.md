@@ -82,9 +82,22 @@ Lurcast uses Crystal 1.21's parallel execution context and scales up to the logi
 
 `burst_size` controls the audio sent to a newly connected listener, `queue_size` limits each slow listener's pending audio bytes, and `metadata_interval` controls ICY metadata insertion. The burst must not exceed the queue. Existing configurations may still use `buffer_size` as an alias for `burst_size`. `header_timeout` and `source_timeout` can split the connection-header and source-idle limits; both default to `timeout`.
 
+`burst_seconds` and `queue_seconds` give the burst and queue as seconds of audio instead, so one setting suits every bitrate. A mount sizes them from the bitrate its source declares (`Ice-Bitrate` or `icy-br`), then every 10 seconds from the rate the source actually sends at, which also covers VBR, FLAC and Ogg streams that don't declare one; it changes a size only when it is more than 25% off. Listeners already connected keep their queue. A mount's own `burst_size` or `queue_size` comes before a global `burst_seconds` or `queue_seconds`.
+
 `send_interval_ms` (default 250) lets a mount hold its source's audio for that long and send it to listeners in one piece. Encoders usually send one MP3 frame at a time, about 38 a second, and a write to every listener for each of them is most of the server's CPU. With 2,000 listeners on an Apple M1 Pro, the server used about 6.5 s of CPU per 15 s with 0 (each piece sent as it comes), 2.4 s with 100, 1.6 s with 250, and 0.9 s with 500. It adds at most that much delay, which players' own buffering of several seconds hides; set it lower, or 0, on a mount that needs the least delay. It can be set per mount.
 
 `max_connections_per_ip` (default 5) limits sources, API and admin requests, and connections still sending headers from one address. Listeners stop counting against it once their stream starts, so many players behind one NAT address can tune in; set `max_listeners_per_ip` to cap them separately (unlimited by default). `rate_limit` new connections per `rate_limit_window` seconds still apply to every connection.
+
+`max_bandwidth_kbps` caps the bandwidth listeners may take, counted as each listener's stream bitrate (HLS listeners are not counted): a new listener who would take the server over it is turned away. When a mount or the whole server is full (`max_listeners`, a mount's `max_listeners`, or `max_bandwidth_kbps`) and the mount has no `fallback_when_full`, Lurcast sends the listener a `302` redirect to the next of `redirect_servers` in turn, typically servers relaying this one:
+
+```yaml
+max_bandwidth_kbps: 900000   # about 900 Mbit/s
+redirect_servers:
+  - https://relay1.example.com
+  - https://relay2.example.com
+```
+
+The redirect adds `lurcast_redirect=1` to the URL, and a server never redirects a request that has it, so a full relay can't send listeners back and forth. A server relaying this one logs in with `relay_username` and `relay_password` (a Lurcast relay does, with its `master_username` and `master_password`) and skips all these listener limits, including `max_listeners_per_ip`, so a full mount can't cut off its relays; it still counts as a listener.
 
 ## Optional services
 

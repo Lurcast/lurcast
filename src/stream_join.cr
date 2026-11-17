@@ -10,6 +10,8 @@ abstract class StreamJoin
   getter position = 0_i64
 
   # Join points older than this many bytes are dropped.
+  getter window : Int32
+
   def initialize(@window : Int32)
   end
 
