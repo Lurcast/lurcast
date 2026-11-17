@@ -25,7 +25,10 @@ class IcecastServer
   SERVER_ID       = "Lurcast/0.3.0"
   ALLOWED_METHODS = "GET, HEAD, PUT, SOURCE, POST, PATCH, OPTIONS"
   MAX_INTRO_BYTES = 16 * 1024 * 1024
-  MUTATING_PATHS  = {"/admin/metadata", "/admin.cgi", "/admin/killsource", "/admin/fallbacks", "/admin/killclient", "/admin/moveclients", "/admin/record", "/admin/reload"}
+  # Read buffer of each client socket, and TLS write buffer. Crystal's default is 32 KiB, which a
+  # listener would keep for hours to read one request of a few hundred bytes.
+  CLIENT_BUFFER_SIZE = 4096
+  MUTATING_PATHS     = {"/admin/metadata", "/admin.cgi", "/admin/killsource", "/admin/fallbacks", "/admin/killclient", "/admin/moveclients", "/admin/record", "/admin/reload"}
 
   getter config : Config
   getter start_time : Time = Time.utc
@@ -87,6 +90,9 @@ class IcecastServer
     @tls_context = context
     accept_connections(listener, "TLS listening") do |client, address|
       tls = OpenSSL::SSL::Socket::Server.new(client, @tls_context || context, sync_close: true)
+      # TLS buffers writes too; a listener's packets and responses' heads fit, and larger writes
+      # skip the buffer.
+      tls.buffer_size = CLIENT_BUFFER_SIZE
       handle_client(tls, address)
     rescue ex
       Log.debug { "TLS connection from #{address} failed: #{ex.message}" }
@@ -487,8 +493,7 @@ class IcecastServer
       clear_relay_request(mount)
       relay_requested = false
     end
-    spawn monitor_listener(listener)
-    listener.wait_closed(@config.max_listener_duration_for(mount).try(&.seconds))
+    watch_listener(listener, @config.max_listener_duration_for(mount).try(&.seconds))
   ensure
     clear_relay_request(mount) if relay_requested
     if listener
@@ -527,18 +532,24 @@ class IcecastServer
     end
   end
 
-  private def monitor_listener(listener : MountPoint::Listener)
+  # Waits, in the listener's own connection fiber, until the player hangs up, the listener is
+  # closed, or it has listened for *limit*. A listener then needs one fiber besides this one, the
+  # one that writes to it, rather than another just to wait. The caller removes the listener.
+  private def watch_listener(listener : MountPoint::Listener, limit : Time::Span?) : Nil
+    deadline = limit.try { |span| Time.instant + span }
     byte = uninitialized UInt8[1]
     until listener.closed?
+      if deadline
+        left = deadline - Time.instant
+        break unless left.positive?
+        set_read_timeout(listener.io, Math.min(left, @config.timeout.seconds))
+      end
       begin
         break if listener.io.read(byte.to_slice) == 0
       rescue IO::TimeoutError
       end
     end
   rescue IO::Error
-  ensure
-    listener.owner.remove_listener(listener.io)
-    listener.close
   end
 
   # Intro files are sent once to each new listener before the live burst.
@@ -982,10 +993,12 @@ class IcecastServer
     "unknown"
   end
 
-  # Client sockets stay unbuffered (`sync`), so a long-lived listener does not hold an 8 KiB write
+  # Client sockets stay unbuffered for writes (`sync`), so a long-lived listener holds no write
   # buffer. With TCP_NODELAY every write is then its own packet, so responses assemble their head in
-  # memory and write it in one call (see `write_response`).
+  # memory and write it in one call (see `write_response`). The read buffer is `CLIENT_BUFFER_SIZE`:
+  # it only ever holds a request, and a listener keeps it for as long as it listens.
   private def configure_socket(client : TCPSocket)
+    client.buffer_size = CLIENT_BUFFER_SIZE
     client.read_timeout = @config.header_timeout_for.seconds
     client.write_timeout = @config.timeout.seconds
     client.tcp_nodelay = true
@@ -993,9 +1006,13 @@ class IcecastServer
   end
 
   private def set_read_timeout(io : IO, seconds : Int32)
+    set_read_timeout(io, seconds.seconds)
+  end
+
+  private def set_read_timeout(io : IO, timeout : Time::Span)
     case io
     when Socket, IO::FileDescriptor, OpenSSL::SSL::Socket
-      io.read_timeout = seconds.seconds
+      io.read_timeout = timeout
     end
   end
 

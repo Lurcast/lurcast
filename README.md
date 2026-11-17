@@ -595,6 +595,24 @@ bin/load_test --port 8000 --password SOURCE_PASSWORD --listeners 5000 --duration
 
 On an Apple M1 Pro laptop, with the server and load generator on the same machine, a release build served 5,000 listeners (640 Mbit/s) at full rate with no drops, using about 1.1 CPU cores and 360 MB of memory. Memory is dominated by each listener's initial burst, so it scales with `burst_size`.
 
+With both on one machine, the load generator competes with the server for the CPU and figures vary a lot from run to run. For numbers to compare, run the server on one Linux machine and the load generator on another, and measure the server where it runs:
+
+```sh
+# On the server machine: a release build, with limits raised for the test.
+ulimit -n 65536
+bin/lurcast -c bench.yml        # max_listeners, max_connections_per_ip and rate_limit above the test
+
+# On the load machine: more local ports and files than listeners, then the test.
+sudo sysctl -w net.ipv4.ip_local_port_range="1024 65000"
+ulimit -n 65536
+bin/load_test --host SERVER --port 8000 --password SOURCE_PASSWORD --listeners 10000 --duration 60 --ramp 20
+
+# On the server machine again, once every listener has connected:
+bench/server_stats.sh $(pgrep -x lurcast) 30 10000
+```
+
+Run each comparison at least three times. One load machine reaches about 60,000 listeners to one server port before it runs out of local ports; use more load machines beyond that. Wait a minute between runs from the same machine, so the last run's connections have left TIME_WAIT.
+
 ## Check
 
 ```sh

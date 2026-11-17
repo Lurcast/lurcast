@@ -500,6 +500,35 @@ describe IcecastServer do
     server.try(&.stop)
   end
 
+  it "notices a listener hanging up while the source sends nothing" do
+    config = Config.new
+    config.host = "127.0.0.1"
+    config.source_password = "secret"
+    config.admin_password = "admin"
+    config.max_connections_per_ip = 10
+    http_listener = TCPServer.new("127.0.0.1", 0)
+    port = http_listener.local_address.as(Socket::IPAddress).port
+    server = IcecastServer.new(config)
+    spawn server.serve(http_listener)
+    Fiber.yield
+
+    source = TCPSocket.new("127.0.0.1", port)
+    source.print "PUT /quiet HTTP/1.1\r\nAuthorization: Basic c291cmNlOnNlY3JldA==\r\nContent-Type: audio/mpeg\r\nExpect: 100-continue\r\n\r\n"
+    read_head(source).should start_with("HTTP/1.1 100")
+    listener = TCPSocket.new("127.0.0.1", port)
+    listener.print "GET /quiet HTTP/1.0\r\n\r\n"
+    read_head(listener).should start_with("HTTP/1.0 200")
+    wait_until { server.get_mount("/quiet").try(&.listener_count) == 1 }
+
+    # No audio flows, so only the connection's own fiber, reading, can see the player leave.
+    listener.close
+    wait_until(2.seconds) { server.get_mount("/quiet").try(&.listener_count) == 0 }
+  ensure
+    source.try(&.close)
+    listener.try(&.close)
+    server.try(&.stop)
+  end
+
   it "loops a fallback file until the requested source returns" do
     webroot = File.tempname("lurcast-fallback", nil)
     Dir.mkdir(webroot)
