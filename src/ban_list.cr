@@ -60,7 +60,7 @@ class BanList
   def load : Nil
     path = @path
     return unless path && File.exists?(path)
-    entries = Array(Ban).from_json(File.read(path)).compact_map { |ban| entry(ban) }
+    entries = File.open(path) { |file| Array(Ban).from_json(file) }.compact_map { |ban| entry(ban) }
     @mutex.synchronize { @entries = entries }
   rescue ex : JSON::ParseException | IO::Error
     Log.error { "Could not read #{path}; keeping the current bans: #{ex.message}" }
@@ -152,9 +152,12 @@ class BanList
     return unless path = @path
     Dir.mkdir_p(File.dirname(path))
     temporary = "#{path}.#{Random::Secure.hex(4)}.tmp"
-    File.write(temporary, @entries.map(&.ban).to_pretty_json, perm: 0o600)
+    File.open(temporary, "w", perm: 0o600) do |file|
+      JSON.build(file, indent: 2) { |json| json.array { @entries.each(&.ban.to_json(json)) } }
+    end
     File.rename(temporary, path)
   rescue ex : IO::Error
+    File.delete?(temporary) if temporary
     Log.error { "Could not save bans to #{path}: #{ex.message}" }
   end
 end

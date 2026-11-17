@@ -15,6 +15,7 @@ require "./extension"
 require "./icecast_api"
 require "./icecast_xml"
 require "./mount_point"
+require "./pacer"
 require "./radio_api"
 require "./shoutcast_api"
 require "./templates"
@@ -70,10 +71,10 @@ class IcecastServer
     if port = @config.tls_port
       tls_cert = @config.tls_cert || raise ArgumentError.new("TLS certificate is required")
       tls_key = @config.tls_key || raise ArgumentError.new("TLS key is required")
-      spawn serve_tls(TCPServer.new(@config.host, port), build_tls_context(tls_cert, tls_key))
+      spawn serve_tls(TCPServer.new(@config.host, port), build_tls_context(tls_cert, tls_key)), name: "tls accept"
     end
     if port = @config.shoutcast_port
-      spawn serve_shoutcast(TCPServer.new(@config.host, port))
+      spawn serve_shoutcast(TCPServer.new(@config.host, port)), name: "shoutcast accept"
     end
     serve(TCPServer.new(@config.host, @config.port))
   end
@@ -115,7 +116,7 @@ class IcecastServer
     while running? && (client = listener.accept?)
       configure_socket(client)
       address = remote_address(client)
-      spawn handler.call(client, address)
+      spawn handler.call(client, address), name: "connection"
     end
   rescue ex : IO::Error
     raise ex if running?
@@ -728,7 +729,7 @@ class IcecastServer
     end
 
     notify_extensions("start a source on #{mount}", &.source_connected(mount, point))
-    spawn fallback_file_loop(mount, point, file)
+    spawn fallback_file_loop(mount, point, file), name: "fallback file"
     point
   rescue ex : File::Error
     Log.warn { "Fallback file #{mount} failed: #{ex.message}" }
@@ -792,6 +793,7 @@ class IcecastServer
   private def fallback_file_loop(mount : String, point : MountPoint, file : File)
     # ponytail: fallback files use bitrate pacing; parse codec timestamps if sample-exact timing matters.
     buffer = Bytes.new(4096)
+    pacer = Pacer.new(@config.fallback_file_bitrate * 1000 / 8.0)
     idle_since = nil.as(Time::Instant?)
     while running? && get_mount(mount) == point && point.source == file
       if point.listener_count == 0
@@ -800,6 +802,7 @@ class IcecastServer
         sleep 10.milliseconds
         next
       end
+      pacer.restart if idle_since
       idle_since = nil
 
       count = file.read(buffer)
@@ -808,7 +811,7 @@ class IcecastServer
         next
       end
       point.publish(buffer[0, count])
-      sleep (count * 8.0 / (@config.fallback_file_bitrate * 1000)).seconds
+      sleep pacer.sent(count)
     end
   rescue ex : IO::Error
     Log.debug { "Fallback file #{mount} stopped: #{ex.message}" }

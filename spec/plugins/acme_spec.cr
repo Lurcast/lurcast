@@ -1,7 +1,7 @@
 require "../spec_helper"
 
-private alias AcmeSupport = Lurcast::AcmeSupport
-private alias AcmePlugin = Lurcast::Plugins::Acme
+private alias ACMESupport = Lurcast::ACMESupport
+private alias AcmePlugin = Lurcast::Plugins::ACME
 
 private FIXTURES = File.join(__DIR__, "..", "fixtures", "acme")
 
@@ -52,7 +52,7 @@ private def served_names(port : Int32, hostname : String) : Array(String)?
   context.verify_mode = OpenSSL::SSL::VerifyMode::NONE
   tls = OpenSSL::SSL::Socket::Client.new(socket, context, sync_close: true, hostname: hostname)
   certificate = tls.peer_certificate || return
-  names = AcmeSupport.dns_names(LibCrypto.x509_get_ext_d2i(certificate.to_unsafe, LibCrypto::NID_subject_alt_name, nil, nil))
+  names = ACMESupport.dns_names(LibCrypto.x509_get_ext_d2i(certificate.to_unsafe, LibCrypto::NID_subject_alt_name, nil, nil))
   tls.close
   names
 rescue Socket::ConnectError | OpenSSL::SSL::Error | IO::Error
@@ -68,20 +68,20 @@ private def start_acme_server(config : Config) : Tuple(IcecastServer, AcmePlugin
   {server, plugin, listener.local_address.port}
 end
 
-describe Lurcast::AcmeSupport do
+describe Lurcast::ACMESupport do
   it "generates P-256 keys that survive a PEM round trip" do
-    key = AcmeSupport::Key.generate
+    key = ACMESupport::Key.generate
     pem = key.to_pem
     pem.should start_with("-----BEGIN PRIVATE KEY-----")
-    copy = AcmeSupport::Key.from_pem(pem)
+    copy = ACMESupport::Key.from_pem(pem)
     copy.jwk.should eq(key.jwk)
     x, y = key.public_coordinates
     {x.size, y.size}.should eq({32, 32})
-    AcmeSupport::Key.generate.jwk.should_not eq(key.jwk)
+    ACMESupport::Key.generate.jwk.should_not eq(key.jwk)
   end
 
   it "rejects keys that are not PEM private keys" do
-    expect_raises(AcmeSupport::CryptoError) { AcmeSupport::Key.from_pem("not a key") }
+    expect_raises(ACMESupport::CryptoError) { ACMESupport::Key.from_pem("not a key") }
   end
 
   it "computes the RFC 7638 example thumbprint" do
@@ -90,19 +90,19 @@ describe Lurcast::AcmeSupport do
       "n"   => "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
       "e"   => "AQAB",
     }
-    AcmeSupport.thumbprint(jwk).should eq("NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs")
+    ACMESupport.thumbprint(jwk).should eq("NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs")
   end
 
   it "converts ECDSA signatures between DER and raw form" do
     raw = Bytes.new(64) { |index| index < 32 ? 0x80_u8 : (index == 32 ? 0_u8 : 0x01_u8) }
-    der = AcmeSupport.ecdsa_raw_to_der(raw)
+    der = ACMESupport.ecdsa_raw_to_der(raw)
     der[0].should eq(0x30)
-    AcmeSupport.ecdsa_der_to_raw(der).should eq(raw)
+    ACMESupport.ecdsa_der_to_raw(der).should eq(raw)
   end
 
   it "signs JWS requests that libcrypto verifies" do
-    key = AcmeSupport::Key.generate
-    client = AcmeSupport::Client.new("https://ca.example/directory", key, AcmeSupport::Challenges.new)
+    key = ACMESupport::Key.generate
+    client = ACMESupport::Client.new("https://ca.example/directory", key, ACMESupport::Challenges.new)
     client.nonce = "nonce-1"
     body = JSON.parse(client.jws("https://ca.example/new-account", %({"termsOfServiceAgreed":true}), use_jwk: true))
     header = JSON.parse(String.new(Base64.decode(body["protected"].as_s)))
@@ -119,42 +119,42 @@ describe Lurcast::AcmeSupport do
     signing_input = "#{body["protected"].as_s}.#{body["payload"].as_s}"
     key.verify(signing_input, signature).should be_true
     key.verify("#{signing_input}x", signature).should be_false
-    AcmeSupport::Key.generate.verify(signing_input, signature).should be_false
+    ACMESupport::Key.generate.verify(signing_input, signature).should be_false
   end
 
   it "uses an empty payload for POST-as-GET" do
-    client = AcmeSupport::Client.new("https://ca.example/directory", AcmeSupport::Key.generate, AcmeSupport::Challenges.new)
+    client = ACMESupport::Client.new("https://ca.example/directory", ACMESupport::Key.generate, ACMESupport::Challenges.new)
     client.nonce = "nonce-2"
     JSON.parse(client.jws("https://ca.example/order/1", nil))["payload"].should eq("")
   end
 
   it "builds a CSR with every domain as a subjectAltName" do
-    key = AcmeSupport::Key.generate
+    key = ACMESupport::Key.generate
     domains = ["radio.example.com", "www.radio.example.com", "stream.example.org"]
-    names, signed = AcmeSupport.csr_details(AcmeSupport.csr(key, domains), key)
+    names, signed = ACMESupport.csr_details(ACMESupport.csr(key, domains), key)
     names.should eq(domains)
     signed.should be_true
-    AcmeSupport.csr_details(AcmeSupport.csr(key, domains), AcmeSupport::Key.generate)[1].should be_false
+    ACMESupport.csr_details(ACMESupport.csr(key, domains), ACMESupport::Key.generate)[1].should be_false
   end
 
   it "reads a certificate's names and validity, checking its key" do
     pem = File.read(File.join(FIXTURES, "certificate.pem"))
-    key = AcmeSupport::Key.from_pem(File.read(File.join(FIXTURES, "certificate-key.pem")))
-    info = AcmeSupport::CertificateInfo.parse(pem, key).should_not be_nil
+    key = ACMESupport::Key.from_pem(File.read(File.join(FIXTURES, "certificate-key.pem")))
+    info = ACMESupport::CertificateInfo.parse(pem, key).should_not be_nil
     info.names.should eq(["a.example.com", "b.example.com"])
     info.not_after.year.should eq(2126)
     info.not_before.should be < Time.utc
     info.covers?(["b.example.com"]).should be_true
     info.covers?(["a.example.com", "c.example.com"]).should be_false
-    AcmeSupport::CertificateInfo.parse(pem, AcmeSupport::Key.generate).should be_nil
+    ACMESupport::CertificateInfo.parse(pem, ACMESupport::Key.generate).should be_nil
   end
 end
 
-describe Lurcast::AcmeSupport::HttpResponder do
+describe Lurcast::ACMESupport::HTTPResponder do
   it "answers known challenge tokens and 404s the rest" do
-    challenges = AcmeSupport::Challenges.new
+    challenges = ACMESupport::Challenges.new
     challenges.add("token-1", "token-1.thumb")
-    responder = AcmeSupport::HttpResponder.new(challenges, ["a.example.com"], 443, false)
+    responder = ACMESupport::HTTPResponder.new(challenges, ["a.example.com"], 443, false)
 
     response = responder.answer(HTTP::Request.new("GET", "/.well-known/acme-challenge/token-1"))
     {response.status, response.body}.should eq({200, "token-1.thumb"})
@@ -167,9 +167,9 @@ describe Lurcast::AcmeSupport::HttpResponder do
   end
 
   it "redirects other requests to HTTPS on a configured domain" do
-    challenges = AcmeSupport::Challenges.new
+    challenges = ACMESupport::Challenges.new
     challenges.add("token-1", "token-1.thumb")
-    responder = AcmeSupport::HttpResponder.new(challenges, ["a.example.com", "b.example.com"], 8443, true)
+    responder = ACMESupport::HTTPResponder.new(challenges, ["a.example.com", "b.example.com"], 8443, true)
 
     response = responder.answer(HTTP::Request.new("GET", "/live?x=1", HTTP::Headers{"Host" => "B.example.com:80"}))
     response.status.should eq(301)
@@ -177,18 +177,18 @@ describe Lurcast::AcmeSupport::HttpResponder do
     responder.answer(HTTP::Request.new("GET", "/", HTTP::Headers{"Host" => "evil.example"})).headers["Location"].should eq("https://a.example.com:8443/")
     responder.answer(HTTP::Request.new("GET", "/.well-known/acme-challenge/token-1")).status.should eq(200)
 
-    standard = AcmeSupport::HttpResponder.new(challenges, ["a.example.com"], 443, true)
+    standard = ACMESupport::HTTPResponder.new(challenges, ["a.example.com"], 443, true)
     standard.answer(HTTP::Request.new("GET", "/status")).headers["Location"].should eq("https://a.example.com/status")
   end
 
   it "writes HTTP/1.1 responses" do
     io = IO::Memory.new
-    AcmeSupport::HttpResponse.new(200, "abc").write(io)
+    ACMESupport::HttpResponse.new(200, "abc").write(io)
     io.to_s.should eq("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc")
   end
 end
 
-describe Lurcast::Plugins::Acme do
+describe Lurcast::Plugins::ACME do
   base = "domains: [radio.example.com]\naccept_terms: true\n"
 
   it "is off without a section and builds with valid settings" do
@@ -247,15 +247,15 @@ describe Lurcast::Plugins::Acme do
   it "renews when the certificate is missing, expiring, or lacks a domain" do
     plugin = build_acme("domains: [a.example.com, b.example.com]\naccept_terms: true\nrenew_days: 30").should_not be_nil
     now = Time.utc
-    fresh = AcmeSupport::CertificateInfo.new(["a.example.com", "b.example.com"], now - 1.day, now + 89.days)
+    fresh = ACMESupport::CertificateInfo.new(["a.example.com", "b.example.com"], now - 1.day, now + 89.days)
     plugin.renewal_reason(nil).should eq("no certificate yet")
     plugin.renewal_reason(fresh).should be_nil
     plugin.renewal_reason(fresh, now + 60.days).to_s.should contain("expires")
-    plugin.renewal_reason(AcmeSupport::CertificateInfo.new(["a.example.com"], now - 1.day, now + 89.days)).should eq("the domain list changed")
+    plugin.renewal_reason(ACMESupport::CertificateInfo.new(["a.example.com"], now - 1.day, now + 89.days)).should eq("the domain list changed")
     plugin.renew_at(fresh).should eq(fresh.not_after - 30.days)
 
     # A six-day certificate is renewed halfway through, not on every check.
-    short = AcmeSupport::CertificateInfo.new(["a.example.com", "b.example.com"], now, now + 6.days)
+    short = ACMESupport::CertificateInfo.new(["a.example.com", "b.example.com"], now, now + 6.days)
     plugin.renew_at(short).should eq(short.not_after - 3.days)
   end
 
@@ -343,12 +343,12 @@ describe Lurcast::Plugins::Acme do
         plugin.renewal_reason(info).should be_nil
 
         # The same account orders again (as a renewal does).
-        account_key = AcmeSupport::Key.from_pem(File.read(File.join(storage, "account.key")))
+        account_key = ACMESupport::Key.from_pem(File.read(File.join(storage, "account.key")))
         tls = OpenSSL::SSL::Context::Client.new
         ENV["LURCAST_ACME_CA_FILE"]?.try { |path| tls.ca_certificates = path }
-        client = AcmeSupport::Client.new(directory, account_key, plugin.challenges, tls: tls)
-        chain = client.obtain([domains.first], AcmeSupport::Key.generate)
-        AcmeSupport::CertificateInfo.parse(chain).try(&.names).should eq([domains.first])
+        client = ACMESupport::Client.new(directory, account_key, plugin.challenges, tls: tls)
+        chain = client.obtain([domains.first], ACMESupport::Key.generate)
+        ACMESupport::CertificateInfo.parse(chain).try(&.names).should eq([domains.first])
       ensure
         server.stop
         FileUtils.rm_rf(data_dir)

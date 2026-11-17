@@ -26,7 +26,7 @@ class Recording < AudioTap
   @done = Channel(Nil).new
 
   def initialize(@mount : String, @directory : String, @extension : String, @split : Time::Span?, @manual = false, &@on_file : Finished ->)
-    spawn write_loop
+    spawn write_loop, name: "recording writer"
   end
 
   def self.extension_for(content_type : String) : String

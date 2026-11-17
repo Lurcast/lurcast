@@ -21,7 +21,7 @@ module Lurcast::Plugins
   #     header: icecast-auth-user   # the default
   #     timeout: 5                  # seconds (default 5)
   # ```
-  class UrlAuth < Plugin
+  class URLAuth < Plugin
     register "url_auth"
 
     REALM = "Lurcast Listener"
@@ -42,9 +42,15 @@ module Lurcast::Plugins
       end
     end
 
+    # Idle connections to the auth service kept for reuse.
+    MAX_IDLE_CONNECTIONS = 8
+
     # Listeners let in, by id, so they are reported when they leave.
     @admitted = Set(Int64).new
     @mutex = Mutex.new
+    @idle = [] of HTTP::Client
+
+    private getter uri : URI { URI.parse(settings.url) }
 
     def source_login(mount : String, address : String, user : String, password : String, admin : Bool) : Bool?
       params = params("stream_auth", mount, address, user, password)
@@ -70,7 +76,7 @@ module Lurcast::Plugins
       params = params("listener_remove", request.mount, request.address, user, password)
       params["client"] = id.to_s
       params["duration"] = (Time.instant - request.started).total_seconds.to_i.to_s
-      spawn notify(params)
+      spawn notify(params), name: "url_auth callback"
     end
 
     def source_connected(mount : String, point : MountPoint) : Nil
@@ -78,7 +84,7 @@ module Lurcast::Plugins
     end
 
     def source_disconnected(mount : String, point : MountPoint) : Nil
-      spawn notify(params("mount_remove", mount))
+      spawn notify(params("mount_remove", mount)), name: "url_auth callback"
     end
 
     # HLS players can't be checked one connection at a time, so this keeps HLS off.
@@ -117,11 +123,30 @@ module Lurcast::Plugins
       Log.warn { "Auth callback #{params["action"]} returned #{response.status_code}" } if response && !response.status.success?
     end
 
+    # Reuses an idle connection when there is one, so a crowd of listeners (after a restart, say)
+    # doesn't open a new connection, and TLS handshake, for every request. HTTP::Client sends the
+    # request again once on a fresh connection when the service has closed an idle one meanwhile.
     private def post(params : Hash(String, String)) : HTTP::Client::Response?
-      Plugin.post_form(settings.url, params, settings.timeout.seconds)
+      client = @mutex.synchronize { @idle.pop? } || connect
+      response = client.post(uri.request_target, form: params)
+      kept = @mutex.synchronize do
+        next false if @idle.size >= MAX_IDLE_CONNECTIONS
+        @idle << client
+        true
+      end
+      client.close unless kept
+      response
     rescue ex
+      client.try(&.close)
       Log.warn { "Auth callback #{params["action"]} failed: #{ex.message}" }
       nil
+    end
+
+    private def connect : HTTP::Client
+      HTTP::Client.new(uri).tap do |client|
+        client.connect_timeout = settings.timeout.seconds
+        client.read_timeout = settings.timeout.seconds
+      end
     end
   end
 end

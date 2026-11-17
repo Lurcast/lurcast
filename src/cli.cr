@@ -33,7 +33,7 @@ module Lurcast
       setup.call(server, config)
       Process.on_terminate { server.stop }
       # `kill -HUP` reloads config.yml (plugins reopen their files) without dropping connections.
-      Signal::HUP.trap { spawn server.reload_config } # ameba:disable Lint/SignalTrap
+      Signal::HUP.trap { spawn(server.reload_config, name: "config reload") } # ameba:disable Lint/SignalTrap
       server.start
     end
   end

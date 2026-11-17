@@ -99,7 +99,7 @@ module Lurcast::Plugins
 
       def initialize(@path : String)
         @io = open
-        spawn write_loop
+        spawn write_loop, name: "access log writer"
       end
 
       def log(line : String) : Nil

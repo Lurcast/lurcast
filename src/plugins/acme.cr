@@ -19,7 +19,7 @@ module Lurcast::Plugins
   #     email: ops@example.com
   #     accept_terms: true
   # ```
-  class Acme < Plugin
+  class ACME < Plugin
     register "acme"
 
     LETS_ENCRYPT   = "https://acme-v02.api.letsencrypt.org/directory"
@@ -94,21 +94,21 @@ module Lurcast::Plugins
     private class Stopped < Exception
     end
 
-    getter challenges = AcmeSupport::Challenges.new
+    getter challenges = ACMESupport::Challenges.new
     # The certificate being served, once there is one.
-    getter certificate : AcmeSupport::CertificateInfo?
+    getter certificate : ACMESupport::CertificateInfo?
 
     @stopped = Atomic(Bool).new(false)
     @wake = Channel(Nil).new(1)
     @http_listener : TCPServer?
     @https_listener : TCPServer?
     @served_pem : String?
-    @client : AcmeSupport::Client?
+    @client : ACMESupport::Client?
 
     def initialize(@config : Config, @settings : Settings)
       @data_dir = @config.data_dir || raise ArgumentError.new("plugins.acme: data_dir is required")
-      @responder = AcmeSupport::HttpResponder.new(@challenges, domains, @settings.https_port, @settings.redirect_http?)
-      @main_port_responder = AcmeSupport::HttpResponder.new(@challenges, domains, @settings.https_port, false)
+      @responder = ACMESupport::HTTPResponder.new(@challenges, domains, @settings.https_port, @settings.redirect_http?)
+      @main_port_responder = ACMESupport::HTTPResponder.new(@challenges, domains, @settings.https_port, false)
     end
 
     def domains : Array(String)
@@ -116,7 +116,7 @@ module Lurcast::Plugins
     end
 
     def start(server : IcecastServer) : Nil
-      spawn run(server)
+      spawn run(server), name: "acme renewal"
     end
 
     def stop : Nil
@@ -137,7 +137,7 @@ module Lurcast::Plugins
     end
 
     # Answers http-01 challenges on the main port too, for setups that forward port 80 to it.
-    @[Route("GET", AcmeSupport::Challenges::PREFIX, prefix: true)]
+    @[Route("GET", ACMESupport::Challenges::PREFIX, prefix: true)]
     private def challenge(context : Context) : Nil
       response = @main_port_responder.answer(context.request)
       context.server.respond(context.client, response.status, response.body, headers: response.headers)
@@ -190,7 +190,7 @@ module Lurcast::Plugins
     end
 
     # Why the certificate *info* must be replaced, or nil when it is fine.
-    def renewal_reason(info : AcmeSupport::CertificateInfo?, now = Time.utc) : String?
+    def renewal_reason(info : ACMESupport::CertificateInfo?, now = Time.utc) : String?
       return "no certificate yet" unless info
       return "the domain list changed" unless info.covers?(domains)
       "it expires #{info.not_after}" if now >= renew_at(info)
@@ -198,11 +198,11 @@ module Lurcast::Plugins
 
     # When to renew: `renew_days` before expiry, but never earlier than halfway through the
     # certificate's lifetime, so short-lived certificates are not renewed over and over.
-    def renew_at(info : AcmeSupport::CertificateInfo) : Time
+    def renew_at(info : ACMESupport::CertificateInfo) : Time
       info.not_after - Math.min(@settings.renew_days.days, info.lifetime / 2)
     end
 
-    private def serve(server : IcecastServer, info : AcmeSupport::CertificateInfo) : Nil
+    private def serve(server : IcecastServer, info : ACMESupport::CertificateInfo) : Nil
       pem = File.read(certificate_path)
       return if pem == @served_pem && @https_listener
       context = build_context
@@ -211,7 +211,7 @@ module Lurcast::Plugins
       else
         listener = TCPServer.new(@config.host, @settings.https_port)
         @https_listener = listener
-        spawn serve_https(server, listener, context)
+        spawn serve_https(server, listener, context), name: "acme https accept"
       end
       Log.info { "Certificate for #{domains.join(", ")} valid until #{info.not_after}, served on port #{@settings.https_port}" }
       @served_pem = pem
@@ -242,14 +242,14 @@ module Lurcast::Plugins
       end
       @http_listener = listener
       Log.info { "ACME challenges#{@settings.redirect_http? ? " and HTTPS redirects" : ""} on #{listener.local_address}" }
-      spawn accept_http(listener)
+      spawn accept_http(listener), name: "acme http accept"
     end
 
     private def accept_http(listener : TCPServer) : Nil
       while client = listener.accept?
         client.read_timeout = 10.seconds
         client.write_timeout = 10.seconds
-        spawn @responder.serve(client)
+        spawn @responder.serve(client), name: "acme http connection"
       end
     rescue ex : IO::Error
       Log.error { "ACME challenge listener stopped: #{ex.message}" } unless @stopped.get
@@ -260,11 +260,11 @@ module Lurcast::Plugins
     # Obtains a new certificate and stores it with its key.
     private def issue : Nil
       account_key = load_or_create_key(account_key_path)
-      certificate_key = AcmeSupport::Key.generate
-      client = @client ||= AcmeSupport::Client.new(@settings.directory, account_key, @challenges, tls: ca_context,
+      certificate_key = ACMESupport::Key.generate
+      client = @client ||= ACMESupport::Client.new(@settings.directory, account_key, @challenges, tls: ca_context,
         sleeper: ->(span : Time::Span) { wait(span) })
       chain = client.obtain(domains, certificate_key, @settings.email)
-      unless AcmeSupport::CertificateInfo.parse(chain, certificate_key)
+      unless ACMESupport::CertificateInfo.parse(chain, certificate_key)
         raise "The CA returned a certificate that does not match the key"
       end
       write_private(certificate_key_path, certificate_key.to_pem)
@@ -279,22 +279,22 @@ module Lurcast::Plugins
     end
 
     # The stored certificate when it can be read and matches its key; nil otherwise.
-    private def load_certificate : AcmeSupport::CertificateInfo?
+    private def load_certificate : ACMESupport::CertificateInfo?
       return unless File.exists?(certificate_path) && File.exists?(certificate_key_path)
-      key = AcmeSupport::Key.from_pem(File.read(certificate_key_path))
-      info = AcmeSupport::CertificateInfo.parse(File.read(certificate_path), key)
+      key = ACMESupport::Key.from_pem(File.read(certificate_key_path))
+      info = ACMESupport::CertificateInfo.parse(File.read(certificate_path), key)
       Log.warn { "The stored certificate does not match its key; requesting a new one" } unless info
       info
-    rescue ex : AcmeSupport::CryptoError | IO::Error
+    rescue ex : ACMESupport::CryptoError | IO::Error
       Log.warn { "Could not read the stored certificate: #{ex.message}; requesting a new one" }
       nil
     end
 
-    private def load_or_create_key(path : String) : AcmeSupport::Key
+    private def load_or_create_key(path : String) : ACMESupport::Key
       if File.exists?(path)
-        AcmeSupport::Key.from_pem(File.read(path))
+        ACMESupport::Key.from_pem(File.read(path))
       else
-        key = AcmeSupport::Key.generate
+        key = ACMESupport::Key.generate
         write_private(path, key.to_pem)
         Log.info { "Created an ACME account key in #{path}" }
         key

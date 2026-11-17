@@ -4,11 +4,11 @@ require "log"
 require "uri"
 require "./crypto"
 
-module Lurcast::AcmeSupport
+module Lurcast::ACMESupport
   Log = ::Log.for("acme")
 
   # Raised for ACME problems (RFC 8555 section 6.7) and protocol failures.
-  class AcmeError < Exception
+  class ACMEError < Exception
     getter type : String?
 
     def initialize(message : String, @type : String? = nil)
@@ -43,11 +43,11 @@ module Lurcast::AcmeSupport
     def directory : Directory
       @directory ||= begin
         response = request("GET", @directory_url)
-        raise AcmeError.new("Could not read the ACME directory #{@directory_url}: HTTP #{response.status_code}") unless response.success?
+        raise ACMEError.new("Could not read the ACME directory #{@directory_url}: HTTP #{response.status_code}") unless response.success?
         json = JSON.parse(response.body)
         Directory.new(json["newNonce"].as_s, json["newAccount"].as_s, json["newOrder"].as_s)
       rescue ex : JSON::ParseException | KeyError | TypeCastError
-        raise AcmeError.new("Invalid ACME directory at #{@directory_url}: #{ex.message}")
+        raise ACMEError.new("Invalid ACME directory at #{@directory_url}: #{ex.message}")
       end
     end
 
@@ -60,7 +60,7 @@ module Lurcast::AcmeSupport
         end
       end
       response = post(directory.new_account, payload, use_jwk: true)
-      @account_url = response.headers["Location"]? || raise AcmeError.new("The CA did not return an account URL")
+      @account_url = response.headers["Location"]? || raise ACMEError.new("The CA did not return an account URL")
     end
 
     # Orders a certificate for *domains* whose key is *certificate_key* and returns the PEM chain.
@@ -68,22 +68,22 @@ module Lurcast::AcmeSupport
       register(email) unless @account_url
       payload = {identifiers: domains.map { |domain| {type: "dns", value: domain} }}.to_json
       response = post(directory.new_order, payload)
-      order_url = response.headers["Location"]? || raise AcmeError.new("The CA did not return an order URL")
+      order_url = response.headers["Location"]? || raise ACMEError.new("The CA did not return an order URL")
       order = parse(response)
       order["authorizations"].as_a.each { |authorization| authorize(authorization.as_s) }
 
       order = poll(order_url, "order", {"ready", "valid"}, ORDER_TIMEOUT) unless order["status"].as_s.in?("ready", "valid")
       if order["status"].as_s == "ready"
-        csr = AcmeSupport.base64url(AcmeSupport.csr(certificate_key, domains))
+        csr = ACMESupport.base64url(ACMESupport.csr(certificate_key, domains))
         order = parse(post(order["finalize"].as_s, {csr: csr}.to_json))
       end
       order = poll(order_url, "order", {"valid"}, ORDER_TIMEOUT) unless order["status"].as_s == "valid"
-      certificate_url = order["certificate"]?.try(&.as_s) || raise AcmeError.new("The order has no certificate URL")
+      certificate_url = order["certificate"]?.try(&.as_s) || raise ACMEError.new("The order has no certificate URL")
       chain = post(certificate_url, nil, accept: "application/pem-certificate-chain").body
-      raise AcmeError.new("The CA returned no certificate") unless chain.includes?("-----BEGIN CERTIFICATE-----")
+      raise ACMEError.new("The CA returned no certificate") unless chain.includes?("-----BEGIN CERTIFICATE-----")
       chain
     rescue ex : KeyError | TypeCastError
-      raise AcmeError.new("Unexpected response from the CA: #{ex.message}")
+      raise ACMEError.new("Unexpected response from the CA: #{ex.message}")
     end
 
     private def authorize(url : String) : Nil
@@ -91,7 +91,7 @@ module Lurcast::AcmeSupport
       return if authorization["status"].as_s == "valid"
       domain = authorization["identifier"]["value"].as_s
       challenge = authorization["challenges"].as_a.find { |item| item["type"].as_s == "http-01" }
-      raise AcmeError.new("The CA offers no http-01 challenge for #{domain}") unless challenge
+      raise ACMEError.new("The CA offers no http-01 challenge for #{domain}") unless challenge
       token = challenge["token"].as_s
       @challenges.add(token, "#{token}.#{@account_key.thumbprint}")
       begin
@@ -111,8 +111,8 @@ module Lurcast::AcmeSupport
         json = parse(response)
         status = json["status"].as_s
         return json if status.in?(wanted)
-        raise AcmeError.new("The #{what} is #{status}#{failure_detail(json)}") if status.in?("invalid", "revoked", "deactivated", "expired")
-        raise AcmeError.new("Timed out waiting for the #{what} (still #{status})") if Time.instant >= deadline
+        raise ACMEError.new("The #{what} is #{status}#{failure_detail(json)}") if status.in?("invalid", "revoked", "deactivated", "expired")
+        raise ACMEError.new("Timed out waiting for the #{what} (still #{status})") if Time.instant >= deadline
         @sleeper.call(retry_after(response))
       end
     end
@@ -164,10 +164,10 @@ module Lurcast::AcmeSupport
           end
         end
       end
-      encoded_header = AcmeSupport.base64url(protected_header)
-      encoded_payload = payload ? AcmeSupport.base64url(payload) : ""
+      encoded_header = ACMESupport.base64url(protected_header)
+      encoded_payload = payload ? ACMESupport.base64url(payload) : ""
       signature = @account_key.sign("#{encoded_header}.#{encoded_payload}")
-      {protected: encoded_header, payload: encoded_payload, signature: AcmeSupport.base64url(signature)}.to_json
+      {protected: encoded_header, payload: encoded_payload, signature: ACMESupport.base64url(signature)}.to_json
     end
 
     private def next_nonce : String
@@ -176,22 +176,22 @@ module Lurcast::AcmeSupport
         return nonce
       end
       request("HEAD", directory.new_nonce)
-      nonce = @nonce || raise AcmeError.new("The CA did not return a nonce")
+      nonce = @nonce || raise ACMEError.new("The CA did not return a nonce")
       @nonce = nil
       nonce
     end
 
-    private def problem(response : HTTP::Client::Response) : AcmeError
+    private def problem(response : HTTP::Client::Response) : ACMEError
       json = JSON.parse(response.body) rescue nil
       type = json.try(&.["type"]?).try(&.as_s?)
       detail = json.try(&.["detail"]?).try(&.as_s?) || response.body[0, 200]
-      AcmeError.new("ACME request failed (HTTP #{response.status_code}#{type ? ", #{type}" : ""}): #{detail}", type)
+      ACMEError.new("ACME request failed (HTTP #{response.status_code}#{type ? ", #{type}" : ""}): #{detail}", type)
     end
 
     private def parse(response : HTTP::Client::Response) : JSON::Any
       JSON.parse(response.body)
     rescue ex : JSON::ParseException
-      raise AcmeError.new("Invalid JSON from the CA: #{ex.message}")
+      raise ACMEError.new("Invalid JSON from the CA: #{ex.message}")
     end
 
     private def request(method : String, url : String, body : String? = nil, headers = HTTP::Headers.new) : HTTP::Client::Response
