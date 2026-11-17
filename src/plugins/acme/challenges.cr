@@ -2,7 +2,7 @@ require "http/headers"
 require "http/request"
 require "http/status"
 
-module Lurcast::AcmeSupport
+module Lurcast::ACMESupport
   # The http-01 key authorizations being answered, by token.
   class Challenges
     PREFIX = "/.well-known/acme-challenge/"
@@ -48,7 +48,7 @@ module Lurcast::AcmeSupport
 
   # Answers requests on the plain HTTP port: http-01 challenges, and either a redirect to HTTPS or
   # 404 for everything else.
-  class HttpResponder
+  class HTTPResponder
     def initialize(@challenges : Challenges, @domains : Array(String), @https_port : Int32, @redirect : Bool)
     end
 

@@ -19,7 +19,7 @@ module Lurcast::Plugins
   #     variants:            # multivariant playlists: /radio.m3u8 offers both mounts
   #       /radio: [/live, /live-mobile]
   # ```
-  class Hls < Plugin
+  class HLS < Plugin
     register "hls"
     dashboard "hls/dashboard.js"
 

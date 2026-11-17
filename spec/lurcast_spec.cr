@@ -444,7 +444,7 @@ describe Lurcast do
 
     stream = IO::Memory.new
     frame = mp3_frame
-    while stream.size < config.metadata_interval + frame.size
+    while stream.size < config.metadata_interval * 2 + frame.size
       stream.write(frame)
     end
     audio = stream.to_slice
@@ -458,6 +458,15 @@ describe Lurcast do
     metadata_payload = Bytes.new(metadata_length)
     listener.read_fully(metadata_payload)
     String.new(metadata_payload).should contain("StreamTitle='Artist - Song';")
+    # The title is sent once; every later metadata point carries an empty block.
+    offset = config.metadata_interval
+    while offset < audio.size
+      chunk = Bytes.new(Math.min(config.metadata_interval, audio.size - offset))
+      listener.read_fully(chunk)
+      chunk.should eq(audio[offset, chunk.size])
+      offset += chunk.size
+      listener.read_byte.should eq(0_u8) if offset < audio.size
+    end
 
     listener.close
     source.close

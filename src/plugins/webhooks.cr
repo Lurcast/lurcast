@@ -208,7 +208,7 @@ module Lurcast::Plugins
     private def start_targets(settings : Settings) : Array(Target)
       settings.endpoints.map do |endpoint|
         target = Target.new(endpoint, settings.timeout.seconds)
-        spawn deliver_loop(target)
+        spawn deliver_loop(target), name: "webhook delivery"
         target
       end
     end

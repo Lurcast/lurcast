@@ -7,10 +7,10 @@ class IcecastServer
     if master_url = @config.master_url
       master_url = master_url.rstrip('/')
       master_password = @config.master_password || raise ArgumentError.new("master password is required")
-      spawn master_relay_loop(master_url, master_password)
+      spawn master_relay_loop(master_url, master_password), name: "master relay"
     end
-    spawn rate_limit_cleanup_loop
-    spawn history_loop
+    spawn rate_limit_cleanup_loop, name: "rate limit cleanup"
+    spawn history_loop, name: "listener history"
   end
 
   private def rate_limit_cleanup_loop
@@ -112,7 +112,7 @@ class IcecastServer
       @master_relays.add(relay.mount) if master
       true
     end
-    spawn relay_loop(relay) if added
+    spawn relay_loop(relay), name: "relay" if added
     added
   end
 

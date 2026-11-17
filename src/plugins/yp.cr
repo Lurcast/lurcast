@@ -13,7 +13,7 @@ module Lurcast::Plugins
   #     timeout: 15          # seconds (default 15)
   #     touch_interval: 60   # seconds between updates, unless a directory asks for another (default 60)
   # ```
-  class Yp < Plugin
+  class YP < Plugin
     register "yp"
 
     class Settings < Plugin::Settings
@@ -71,7 +71,7 @@ module Lurcast::Plugins
     private def start_loop(point : MountPoint, url : String) : Nil
       key = {point.object_id, url}
       return unless @mutex.synchronize { @loops.add?(key) }
-      spawn do
+      spawn(name: "yp directory") do
         run(point, url)
       ensure
         @mutex.synchronize { @loops.delete(key) }

@@ -3,7 +3,7 @@ require "digest/sha256"
 require "json"
 require "./lib_crypto"
 
-module Lurcast::AcmeSupport
+module Lurcast::ACMESupport
   class CryptoError < Exception
     # Raises with *message* and the most recent libcrypto error, clearing the error queue.
     def self.raise_last(message : String) : NoReturn
@@ -73,7 +73,7 @@ module Lurcast::AcmeSupport
     end
 
     def self.from_pem(pem : String) : Key
-      pointer = AcmeSupport.with_read_bio(pem) { |bio| LibAcmeCrypto.pem_read_bio_private_key(bio, nil, nil, nil) }
+      pointer = ACMESupport.with_read_bio(pem) { |bio| LibAcmeCrypto.pem_read_bio_private_key(bio, nil, nil, nil) }
       CryptoError.raise_last("Could not read the private key") if pointer.null?
       key = new(pointer)
       key.public_coordinates # rejects keys that are not EC P-256
@@ -88,7 +88,7 @@ module Lurcast::AcmeSupport
     end
 
     def to_pem : String
-      AcmeSupport.write_bio do |bio|
+      ACMESupport.write_bio do |bio|
         if LibAcmeCrypto.pem_write_bio_private_key(bio, @pointer, nil, nil, 0, nil, nil) != 1
           CryptoError.raise_last("Could not write the private key")
         end
@@ -103,22 +103,22 @@ module Lurcast::AcmeSupport
     # The public key as a JWK (RFC 7517), with only the members a thumbprint uses.
     def jwk : Hash(String, String)
       x, y = public_coordinates
-      {"crv" => "P-256", "kty" => "EC", "x" => AcmeSupport.base64url(x), "y" => AcmeSupport.base64url(y)}
+      {"crv" => "P-256", "kty" => "EC", "x" => ACMESupport.base64url(x), "y" => ACMESupport.base64url(y)}
     end
 
     def thumbprint : String
-      AcmeSupport.thumbprint(jwk)
+      ACMESupport.thumbprint(jwk)
     end
 
     # An ES256 signature of *data*: the raw 64-byte r || s form JWS uses.
     def sign(data : Bytes | String) : Bytes
-      AcmeSupport.ecdsa_der_to_raw(sign_der(data.to_slice))
+      ACMESupport.ecdsa_der_to_raw(sign_der(data.to_slice))
     end
 
     # Checks a raw r || s ES256 signature.
     def verify(data : Bytes | String, signature : Bytes) : Bool
       return false unless signature.size == 64
-      der = AcmeSupport.ecdsa_raw_to_der(signature)
+      der = ACMESupport.ecdsa_raw_to_der(signature)
       bytes = data.to_slice
       with_digest_context do |context|
         if LibAcmeCrypto.evp_digest_verify_init(context, nil, LibCrypto.evp_sha256, nil, @pointer) != 1
@@ -289,11 +289,11 @@ module Lurcast::AcmeSupport
   record CertificateInfo, names : Array(String), not_before : Time, not_after : Time do
     # Reads the first certificate in *pem*; nil when *key* is given and is not the certificate's key.
     def self.parse(pem : String, key : Key? = nil) : CertificateInfo?
-      certificate = AcmeSupport.with_read_bio(pem) { |bio| LibAcmeCrypto.pem_read_bio_x509(bio, nil, nil, nil) }
+      certificate = ACMESupport.with_read_bio(pem) { |bio| LibAcmeCrypto.pem_read_bio_x509(bio, nil, nil, nil) }
       CryptoError.raise_last("Could not read the certificate") if certificate.null?
       begin
         return if key && LibAcmeCrypto.x509_check_private_key(certificate, key.pointer) != 1
-        names = AcmeSupport.dns_names(LibCrypto.x509_get_ext_d2i(certificate, LibCrypto::NID_subject_alt_name, nil, nil))
+        names = ACMESupport.dns_names(LibCrypto.x509_get_ext_d2i(certificate, LibCrypto::NID_subject_alt_name, nil, nil))
         new(names, time(LibAcmeCrypto.x509_get0_not_before(certificate)), time(LibAcmeCrypto.x509_get0_not_after(certificate)))
       ensure
         LibCrypto.x509_free(certificate)

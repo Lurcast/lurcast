@@ -21,6 +21,11 @@ class MountPoint
   DEFAULT_QUEUE_SIZE        = 524_288
   DEFAULT_METADATA_INTERVAL =    8192
   EMPTY_METADATA_BLOCK      = Bytes[0_u8]
+  MAX_POOLED_STITCH         = 65_536
+  MAX_STITCH_BUFFERS        =     64
+
+  @@stitch_buffers = [] of IO::Memory
+  @@stitch_mutex = Mutex.new
 
   class ListenerQueue
     getter capacity : Int32
@@ -367,7 +372,7 @@ class MountPoint
 
   def listener_details : Array(ListenerInfo)
     @listeners_mutex.synchronize do
-      @listeners.values.map do |listener|
+      @listeners.map do |_io, listener|
         ListenerInfo.new(listener.id, listener.address, listener.user_agent, listener.connected_seconds, listener.country)
       end
     end.sort_by!(&.id)
@@ -443,7 +448,7 @@ class MountPoint
         @total_connections += 1
         @peak_listeners = Math.max(@peak_listeners, @listeners.size)
       end
-      spawn write_listener(listener, intro, burst)
+      spawn write_listener(listener, intro, burst), name: "listener writer"
     end
     listener
   end
@@ -700,25 +705,43 @@ class MountPoint
     owner = listener.owner
     io = listener.io
 
-    if listener.wants_metadata?
-      offset = 0
-      while offset < data.size
-        length = Math.min(listener.remaining, data.size - offset)
-        io.write(data[offset, length])
-        offset += length
-        listener.remaining -= length
+    if listener.wants_metadata? && data.size >= listener.remaining
+      # Plain sockets don't buffer writes, so the audio and its metadata are joined first and
+      # leave in one write rather than one for each piece.
+      with_stitch_buffer do |buffer|
+        offset = 0
+        while offset < data.size
+          length = Math.min(listener.remaining, data.size - offset)
+          buffer.write(data[offset, length])
+          offset += length
+          listener.remaining -= length
 
-        if listener.remaining == 0
-          io.write(owner.metadata_block(listener))
-          listener.remaining = listener.metadata_interval
+          if listener.remaining == 0
+            buffer.write(owner.metadata_block(listener))
+            listener.remaining = listener.metadata_interval
+          end
         end
+        io.write(buffer.to_slice)
       end
     else
+      listener.remaining -= data.size if listener.wants_metadata?
       io.write(data)
     end
     io.flush
     owner.count_bytes_sent(data.size)
     listener.count_bytes(data.size)
+  end
+
+  # Lends a buffer from a pool shared by all listeners, so none keeps one of its own. A buffer
+  # that grew past MAX_POOLED_STITCH (a large burst) is left to the GC rather than kept.
+  private def with_stitch_buffer(&)
+    buffer = @@stitch_mutex.synchronize { @@stitch_buffers.pop? } || IO::Memory.new
+    buffer.clear
+    yield buffer
+  ensure
+    if buffer && buffer.bytesize <= MAX_POOLED_STITCH
+      @@stitch_mutex.synchronize { @@stitch_buffers << buffer if @@stitch_buffers.size < MAX_STITCH_BUFFERS }
+    end
   end
 
   private def write_listener(listener : Listener, intro : Bytes, burst : Bytes)

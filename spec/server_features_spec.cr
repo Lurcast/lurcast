@@ -1,3 +1,4 @@
+require "http/server"
 require "./spec_helper"
 
 describe IcecastServer do
@@ -764,6 +765,51 @@ describe IcecastServer do
     listener.try(&.close)
     auth_listener.try(&.close)
     server.try(&.stop)
+  end
+
+  it "reuses its connection to the authentication service" do
+    actions = Channel({String, String}).new(20)
+    auth = HTTP::Server.new do |context|
+      params = HTTP::Params.parse(context.request.body.try(&.gets_to_end) || "")
+      actions.send({params["action"], context.request.remote_address.to_s})
+      context.response.headers["Icecast-Auth-User"] = "1"
+    end
+    auth_port = auth.bind_tcp("127.0.0.1", 0).port
+    spawn auth.listen
+
+    config = Config.new
+    config.host = "127.0.0.1"
+    config.source_password = "local-password-is-not-used"
+    config.admin_password = "admin"
+    config.plugins = {"url_auth" => YAML.parse("url: http://127.0.0.1:#{auth_port}/auth")}
+    config.max_connections_per_ip = 10
+    http_listener = TCPServer.new("127.0.0.1", 0)
+    port = http_listener.local_address.as(Socket::IPAddress).port
+    server = IcecastServer.new(config)
+    spawn server.serve(http_listener)
+    Fiber.yield
+
+    source = TCPSocket.new("127.0.0.1", port)
+    source.print "PUT /kept HTTP/1.1\r\nAuthorization: Basic ZGo6YW55dGhpbmc=\r\nContent-Type: audio/mpeg\r\nExpect: 100-continue\r\n\r\n"
+    read_head(source).should start_with("HTTP/1.1 100")
+    seen = [receive(actions), receive(actions)]
+
+    listeners = Array(TCPSocket).new
+    3.times do
+      listener = TCPSocket.new("127.0.0.1", port)
+      listeners << listener
+      listener.print "GET /kept HTTP/1.0\r\nAuthorization: Basic bGlzdGVuZXI6YW55dGhpbmc=\r\n\r\n"
+      read_head(listener).should start_with("HTTP/1.0 200")
+      seen << receive(actions)
+    end
+
+    seen.map(&.[0]).should eq(["stream_auth", "mount_add", "listener_add", "listener_add", "listener_add"])
+    seen.map(&.[1]).uniq!.size.should eq(1)
+  ensure
+    listeners.try(&.each(&.close))
+    source.try(&.close)
+    server.try(&.stop)
+    auth.try(&.close)
   end
 
   it "adds, touches, and removes listed streams from YP directories" do
